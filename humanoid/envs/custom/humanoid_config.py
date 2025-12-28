@@ -1,5 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2021 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2021 ETH Zurich, Nikita Rudin
 # SPDX-License-Identifier: BSD-3-Clause
-#
+# 
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
 #
@@ -81,8 +83,9 @@ class XBotLCfg(LeggedRobotCfg):
         num_rows = 20  # number of terrain rows (levels)
         num_cols = 20  # number of terrain cols (types)
         max_init_terrain_level = 10  # starting curriculum state
-        # plane; obstacles; uniform; slope_up; slope_down, stair_up, stair_down
-        terrain_proportions = [0.2, 0.2, 0.4, 0.1, 0.1, 0, 0]
+        # plane; obstacles; uniform; slope_up; slope_down, stair_up, stair_down, balancing_beams
+        # Adjusted to include balancing beams (last element)
+        terrain_proportions = [0.1, 0.1, 0.3, 0.1, 0.1, 0.1, 0.1, 0.1]
         restitution = 0.
 
     class noise:
@@ -259,3 +262,25 @@ class XBotLCfgPPO(LeggedRobotCfgPPO):
         load_run = -1  # -1 = last run
         checkpoint = -1  # -1 = last saved model
         resume_path = None  # updated from load_run and chkpt
+
+class XBotLBalancingBeamsCfg(XBotLCfg):
+    class terrain(XBotLCfg.terrain):
+        mesh_type = 'trimesh'
+        curriculum = False
+        selected = True
+        terrain_kwargs = {
+            'type': 'balancing_beams_terrain',
+            'terrain_kwargs': {'difficulty': 0.8}
+        }
+        # Increase resolution for thin beams - 2cm for training
+        horizontal_scale = 0.02
+        # Terrain dimensions with borders: 2.5m × 8.5m (2m × 8m effective + 0.25m borders)
+        terrain_width = 2.5
+        terrain_length = 8.5
+        # Use single terrain for cleaner demo/training
+        num_rows = 1
+        num_cols = 1
+
+class XBotLBalancingBeamsCfgPPO(XBotLCfgPPO):
+    class runner(XBotLCfgPPO.runner):
+        experiment_name = 'XBot_balancing_beams_ppo'

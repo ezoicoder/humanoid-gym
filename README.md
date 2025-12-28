@@ -1,3 +1,22 @@
+## 🆕 平衡木地形 (Balancing Beams Terrain)
+
+新增了具有挑战性的**平衡木地形**，用于测试机器人的平衡能力和精确控制。该地形包含不同宽度、横向偏移和间隙的窄梁。目前只是实现load 场景，还没有测试训练。
+
+**快速开始：**
+```bash
+# 训练专门策略
+python scripts/train.py --task=humanoid_balancing_beams_ppo --run_name v1 --headless --num_envs 4096
+
+# 可视化训练策略（5个难度级别）
+python scripts/play_balancing_beams.py --task=humanoid_balancing_beams_ppo --run_name v1
+
+# 可视化也可以用 humanoid_ppo训出来的，即通用行走策略，比如
+python scripts/play_balancing_beams.py --task=humanoid_ppo --run_name v1
+
+```
+
+📖 **[详细文档](README_BALANCING_BEAMS.md)** | 地形规格：2.5m × 8.5m，9个难度级别
+
 # <a href="https://sites.google.com/view/humanoid-gym/">Humanoid-Gym: Reinforcement Learning for Humanoid Robot with Zero-Shot Sim2Real Transfer</a>
 
 <a href="https://sites.google.com/view/humanoid-gym/"><strong>Project Page</strong></a>

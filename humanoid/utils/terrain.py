@@ -99,17 +99,39 @@ class Terrain:
 
             terrain = terrain_utils.SubTerrain("terrain",
                               width=self.width_per_env_pixels,
-                              length=self.width_per_env_pixels,
-                              vertical_scale=self.vertical_scale,
-                              horizontal_scale=self.horizontal_scale)
+                              length=self.length_per_env_pixels,
+                              vertical_scale=self.cfg.vertical_scale,
+                              horizontal_scale=self.cfg.horizontal_scale)
 
-            eval(terrain_type)(terrain, **self.cfg.terrain_kwargs.terrain_kwargs)
+            # Retrieve base kwargs (might be empty or contain default difficulty)
+            kwargs = self.cfg.terrain_kwargs.terrain_kwargs.copy()
+            
+            # Maintain design consistency: num_rows represents difficulty (like curriculum mode)
+            # Row i maps to difficulty: i / num_rows
+            # This preserves the semantic meaning across different terrain generation modes
+            if self.cfg.num_rows > 1:
+                kwargs['difficulty'] = i / (self.cfg.num_rows - 1)
+            else:
+                # Single row: use default difficulty from kwargs if provided, else 0.5
+                if 'difficulty' not in kwargs:
+                    kwargs['difficulty'] = 0.5
+            
+            # Legacy support: allow difficulty_over_cols for backward compatibility
+            # But this breaks the design convention and should be deprecated
+            if hasattr(self.cfg.terrain_kwargs, 'difficulty_over_cols') and self.cfg.terrain_kwargs['difficulty_over_cols']:
+                # Map column j to difficulty 0..1
+                if self.cfg.num_cols > 1:
+                    kwargs['difficulty'] = j / (self.cfg.num_cols - 1)
+                else:
+                    kwargs['difficulty'] = 0.5
+
+            eval(terrain_type)(terrain, **kwargs)
             self.add_terrain_to_map(terrain, i, j)
     
     def make_terrain(self, choice, difficulty):
         terrain = terrain_utils.SubTerrain(   "terrain",
                                 width=self.width_per_env_pixels,
-                                length=self.width_per_env_pixels,
+                                length=self.length_per_env_pixels,
                                 vertical_scale=self.cfg.vertical_scale,
                                 horizontal_scale=self.cfg.horizontal_scale)
         slope = difficulty * 0.4
@@ -152,7 +174,10 @@ class Terrain:
         end_x = self.border + (i + 1) * self.length_per_env_pixels
         start_y = self.border + j * self.width_per_env_pixels
         end_y = self.border + (j + 1) * self.width_per_env_pixels
-        self.height_field_raw[start_x: end_x, start_y:end_y] = terrain.height_field_raw
+        
+        # SubTerrain height_field_raw is (width, length), but we need (length, width)
+        # so we transpose it
+        self.height_field_raw[start_x: end_x, start_y:end_y] = terrain.height_field_raw.T
 
         env_origin_x = (i + 0.5) * self.env_length
         env_origin_y = (j + 0.5) * self.env_width
@@ -160,7 +185,8 @@ class Terrain:
         x2 = int((self.env_length/2. + 1) / terrain.horizontal_scale)
         y1 = int((self.env_width/2. - 1) / terrain.horizontal_scale)
         y2 = int((self.env_width/2. + 1) / terrain.horizontal_scale)
-        env_origin_z = np.max(terrain.height_field_raw[x1:x2, y1:y2])*terrain.vertical_scale
+        # Also transpose when accessing terrain.height_field_raw
+        env_origin_z = np.max(terrain.height_field_raw.T[x1:x2, y1:y2])*terrain.vertical_scale
         self.env_origins[i, j] = [env_origin_x, env_origin_y, env_origin_z]
 
 def gap_terrain(terrain, gap_size, platform_size=1.):
@@ -186,6 +212,132 @@ def pit_terrain(terrain, depth, platform_size=1.):
     y2 = terrain.width // 2 + platform_size
     terrain.height_field_raw[x1:x2, y1:y2] = -depth
 
+def balancing_beams_terrain(terrain, difficulty=1):
+    """
+    Generate balancing beams terrain according to paper specifications.
+    
+    Coordinate system:
+    - y-direction: forward direction (from start platform to end platform)
+    - x-direction: lateral direction (left-right), with periodic oscillation
+    - z-direction: height (±0.05m variation)
+    
+    Parameters from paper (for discrete difficulty levels l ∈ {0,1,2,3,4,5,6,7,8}):
+    - stone_size: 0.3 - 0.05[l/3] meters (width in x-direction)
+    - stone_distance (x-direction): 0.4 - 0.05l meters (lateral offset amplitude)
+    - y_distance: [0.2, 0.2, 0.2, 0.25, 0.3, 0.35, 0.35, 0.4, 0.2] meters (forward step)
+    
+    Terrain layout:
+    - Total effective area: 2.5m (width) × variable length
+    - Border around the terrain: 0.25m on all sides (height = 0)
+    - Start platform: 2m (width) × 1m (length)
+    - End platform: 2m (width) × 1m (length)
+    
+    Args:
+        terrain: SubTerrain object
+        difficulty: float from 0 to 1, will be mapped to discrete level l from 0 to 8
+    """
+    # Map difficulty 0..1 to discrete level 0..8 (round to nearest integer)
+    l = int(np.round(difficulty * 8))
+    l = np.clip(l, 0, 8)
+    
+    # Paper formula: stone_size (beam width in x-direction)
+    stone_size = 0.3 - 0.05 * (l // 3)
+    
+    # Paper formula: stone_distance (lateral offset amplitude in x-direction)
+    x_offset = 0.4 - 0.05 * l
+    
+    # Paper formula: y_distance (forward step in y-direction)
+    y_steps = [0.2, 0.2, 0.2, 0.25, 0.3, 0.35, 0.35, 0.4, 0.2]
+    y_step = y_steps[l]
+    
+    # Set entire terrain to pit depth (1.0m below ground)
+    depth = 1.0
+    depth_int = int(depth / terrain.vertical_scale)
+    terrain.height_field_raw[:, :] = -depth_int
+    
+    # Border configuration
+    border_width = 0.25  # 0.25m border on all sides
+    border_width_pixels = int(border_width / terrain.horizontal_scale)
+    
+    # Create border frame around the entire terrain (height = 0)
+    # Top and bottom borders (full width)
+    terrain.height_field_raw[:, 0:border_width_pixels] = 0
+    terrain.height_field_raw[:, terrain.length - border_width_pixels:terrain.length] = 0
+    # Left and right borders (full length)
+    terrain.height_field_raw[0:border_width_pixels, :] = 0
+    terrain.height_field_raw[terrain.width - border_width_pixels:terrain.width, :] = 0
+    
+    # Platform dimensions: 1.5m (width) × 1m (length)
+    platform_width = 1.5
+    platform_length = 1.0
+    platform_width_pixels = int(platform_width / terrain.horizontal_scale)
+    platform_length_pixels = int(platform_length / terrain.horizontal_scale)
+    
+    # Center line in x-direction (width dimension)
+    mid_x = terrain.width // 2
+    
+    # Start platform: 2m × 1m at the beginning (after border)
+    start_y = border_width_pixels
+    terrain.height_field_raw[mid_x - platform_width_pixels//2 : mid_x + platform_width_pixels//2,
+                            start_y : start_y + platform_length_pixels] = 0
+    
+    # End platform: 2m × 1m at the end (before border)
+    end_y = terrain.length - border_width_pixels - platform_length_pixels
+    terrain.height_field_raw[mid_x - platform_width_pixels//2 : mid_x + platform_width_pixels//2,
+                            end_y : end_y + platform_length_pixels] = 0
+    
+    # Convert parameters to pixels
+    stone_size_pixels = int(stone_size / terrain.horizontal_scale)
+    y_step_pixels = int(y_step / terrain.horizontal_scale)
+    x_offset_pixels = int(x_offset / terrain.horizontal_scale)
+    
+    # Start generating stones after the start platform
+    current_y = start_y + platform_length_pixels
+    
+    step = 0
+    
+    print(f"stone_size_pixels: {stone_size_pixels}, y_step_pixels: {y_step_pixels}, x_offset_pixels: {x_offset_pixels} difficulty: {difficulty} stone_size: {stone_size} y_step: {y_step}  x_offset: {x_offset}")
+
+    # Generate stones until we reach the end platform
+    while current_y + stone_size_pixels <= end_y:
+        # Periodic oscillation in x-direction with period 2 (zigzag pattern)
+        # step % 2 == 0: offset to one side
+        # step % 2 == 1: offset to the other side
+        if step % 2 == 0:
+            current_x_center = mid_x + x_offset_pixels//2
+        else:
+            current_x_center = mid_x - x_offset_pixels//2
+        
+        # Calculate stone boundaries in x-direction (lateral)
+        x1 = current_x_center - stone_size_pixels // 2
+        x2 = current_x_center + stone_size_pixels // 2
+        
+        # Calculate stone boundaries in y-direction (forward)
+        y1 = current_y
+        y2 = current_y + stone_size_pixels  # stone is square (stone_size × stone_size)
+        
+        # Don't overlap with end platform
+        if y2 > end_y:
+            break
+        
+        # Height variation ±0.05m as specified in paper
+        height_var = np.random.uniform(-0.05, 0.05)
+        height_int = int(height_var / terrain.vertical_scale)
+        
+        # Clip to terrain boundaries (but respect borders)
+        x1 = max(border_width_pixels, x1)
+        x2 = min(terrain.width - border_width_pixels, x2)
+        y1 = max(border_width_pixels, y1)
+        y2 = min(terrain.length - border_width_pixels, y2)
+        
+        # Place the stone (SubTerrain uses [width, length] indexing)
+        if x2 > x1 and y2 > y1:
+            terrain.height_field_raw[x1:x2, y1:y2] = height_int
+        
+        # Advance to next stone position (forward by y_step)
+        current_y = y1 + y_step_pixels
+        step += 1
+
 class HumanoidTerrain(Terrain):
     def __init__(self, cfg: LeggedRobotCfg.terrain, num_robots) -> None:
         super().__init__(cfg, num_robots)
@@ -203,7 +355,7 @@ class HumanoidTerrain(Terrain):
     def make_terrain(self, choice, difficulty):
         terrain = terrain_utils.SubTerrain(   "terrain",
                                 width=self.width_per_env_pixels,
-                                length=self.width_per_env_pixels,
+                                length=self.length_per_env_pixels,
                                 vertical_scale=self.cfg.vertical_scale,
                                 horizontal_scale=self.cfg.horizontal_scale)
         discrete_obstacles_height = difficulty * 0.04
@@ -227,5 +379,5 @@ class HumanoidTerrain(Terrain):
         elif choice < self.proportions[6]:
             terrain_utils.pyramid_stairs_terrain(terrain, step_width=0.4, step_height=-discrete_obstacles_height, platform_size=1.)
         else:
-            pass
+            balancing_beams_terrain(terrain, difficulty)
         return terrain
