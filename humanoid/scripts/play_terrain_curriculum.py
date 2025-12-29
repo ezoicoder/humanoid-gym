@@ -37,7 +37,7 @@ from humanoid import LEGGED_GYM_ROOT_DIR
 
 # import isaacgym
 from humanoid.envs import *
-from humanoid.utils import  get_args, export_policy_as_jit, task_registry, Logger
+from humanoid.utils import get_args, export_policy_as_jit, task_registry, Logger
 from isaacgym.torch_utils import *
 
 import torch
@@ -47,55 +47,53 @@ from datetime import datetime
 
 def play(args):
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
-    # override some parameters for testing
-    env_cfg.env.num_envs = 5 # Ensure enough environments for 5 difficulty levels (rows)
-    env_cfg.sim.max_gpu_contact_pairs = 2**10
-    
-    # Configure for Balancing Beams
+    # Configure for Terrain Curriculum (Balancing Beams + Stones Everywhere)
     env_cfg.terrain.mesh_type = 'trimesh'
-    env_cfg.terrain.selected = True
     
-    # Increase resolution for better visual of thin beams
+    # Increase resolution for better visual of terrain details
     # Resolution: 0.02m (2cm) for good detail
     env_cfg.terrain.horizontal_scale = 0.02
     
     # Follow design convention: num_rows = difficulty levels, num_cols = terrain type variants
-    # 5 rows = 5 difficulty levels (0.0, 0.25, 0.5, 0.75, 1.0)
-    # 1 col = only balancing beams (not multiple terrain types)
-    env_cfg.terrain.num_rows = 5
-    env_cfg.terrain.num_cols = 1
+    # Modify these two parameters to change the terrain layout
+    num_rows = 9  # Number of difficulty levels
+    num_cols = 3   # Number of terrain types (balancing beams, stones everywhere, stepping stones)
     
-    # Terrain dimensions with borders: 2.5m × 8.5m (2m × 8m effective + 0.25m borders)
-    env_cfg.terrain.terrain_width = 2.5   # 2.5m width (2m + 2×0.25m borders)
-    env_cfg.terrain.terrain_length = 8.5  # 8.5m length (8m + 2×0.25m borders)
+    env_cfg.terrain.num_rows = num_rows
+    env_cfg.terrain.num_cols = num_cols
+    
+    # Terrain dimensions: uniform 8.5m × 8.5m per terrain cell
+    # For balancing beams: 2m effective width × 8m length (center carved, sides are pits)
+    # For stones everywhere: 8m × 8m effective area (corners are pits)
+    # For stepping stones: 2m effective width × 8m length (alternating stones, sides are pits)
+    # All include 0.25m borders on all sides
+    env_cfg.terrain.terrain_width = 8.5   # 8.5m width
+    env_cfg.terrain.terrain_length = 8.5  # 8.5m length
     
     # Ensure standard terrain parameters are compatible
-    env_cfg.terrain.border_size = 5 
+    env_cfg.terrain.border_size = 5
     
-    class TerrainKwargs:
-        def __init__(self, **kwargs):
-            self.__dict__.update(kwargs)
-        def pop(self, key):
-            return self.__dict__.pop(key)
-        def __getitem__(self, key):
-            return self.__dict__[key]
-            
-    # Terrain generation parameters
-    # Note: difficulty will be automatically calculated as i / (num_rows - 1) for each row
-    # So the terrain_kwargs difficulty value here will be overridden
-    env_cfg.terrain.terrain_kwargs = TerrainKwargs(
-        type='balancing_beams_terrain',
-        terrain_kwargs={}  # Empty dict, difficulty will be set by row index
-    )
+    # Enable curriculum mode
+    env_cfg.terrain.curriculum = True
+    env_cfg.terrain.max_init_terrain_level = num_rows - 1  # Max difficulty level
     
-    env_cfg.terrain.curriculum = False
-    env_cfg.terrain.max_init_terrain_level = 5
+    # Override num_envs based on terrain layout
+    env_cfg.env.num_envs = num_rows * num_cols  # One robot per terrain cell
+    env_cfg.sim.max_gpu_contact_pairs = 2**10
+    
+    # Terrain proportions control which terrain appears in each column:
+    # Proportions array: [flat, obstacles, uniform, slope+, slope-, stairs+, stairs-, beams, stones, stepping]
+    # With num_cols=3 and proportions=[0, 0, 0, 0, 0, 0, 0, 0.33, 0.67, 1.0]:
+    #   - Column 0 (choice ≈ 0.001): falls in range (0.0, 0.33] → balancing_beams_terrain
+    #   - Column 1 (choice ≈ 0.334): falls in range (0.33, 0.67] → stones_everywhere_terrain
+    #   - Column 2 (choice ≈ 0.667): falls in range (0.67, 1.0] → stepping_stones_terrain
+    env_cfg.terrain.terrain_proportions = [0, 0, 0, 0, 0, 0, 0, 0.33, 0.33, 0.34]
+    
     env_cfg.noise.add_noise = True
     env_cfg.domain_rand.push_robots = False 
     env_cfg.domain_rand.joint_angle_noise = 0.
     env_cfg.noise.curriculum = False
     env_cfg.noise.noise_level = 0.5
-
 
     train_cfg.seed = 123145
     print("train_cfg.runner_class_name:", train_cfg.runner_class_name)
@@ -104,20 +102,28 @@ def play(args):
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
     env.set_camera(env_cfg.viewer.pos, env_cfg.viewer.lookat)
 
-    # Manually distribute robots to different terrain rows (difficulty levels)
+    # Manually distribute robots to different terrain cells (row, col)
     # env.env_origins is a tensor of shape (num_envs, 3)
     # terrain.env_origins is numpy array of shape (num_rows, num_cols, 3)
-    # Following design convention: num_rows = difficulty levels
-    # We want robot i to go to terrain row i (difficulty level i)
+    # Following design convention: 
+    #   - num_rows = difficulty levels (configurable via num_rows variable above)
+    #   - num_cols = terrain types (configurable via num_cols variable above)
     if hasattr(env, 'terrain') and env.cfg.terrain.mesh_type in ["heightfield", "trimesh"]:
-        print("Distributing robots across difficulty levels (rows)...")
-        num_rows = env.terrain.cfg.num_rows
-        num_cols = env.terrain.cfg.num_cols
+        terrain_num_rows = env.terrain.cfg.num_rows
+        terrain_num_cols = env.terrain.cfg.num_cols
         
-        # Assign each robot to a different row (difficulty level)
+        print(f"Distributing robots across terrain curriculum ({terrain_num_rows} difficulty × {terrain_num_cols} terrain types)...")
+        print("Terrain layout (uniform 8.5m × 8.5m per cell):")
+        print("  Column 0: Balancing Beams (2m width × 8m length effective, 1.5m×1m platforms)")
+        print("  Column 1: Stones Everywhere (8m × 8m effective, 4m×4m central platform)")
+        print("  Column 2: Stepping Stones (2m width × 8m length effective, 1.5m×1m platforms, alternating stones)")
+        print(f"  Rows: {terrain_num_rows} difficulty levels from 0.0 to 1.0")
+        
+        # Assign each robot to a different terrain cell
+        # Robot 0-2 at difficulty 0 (row 0), Robot 3-5 at difficulty 1 (row 1), etc.
         for i in range(env.num_envs):
-            row_idx = i % num_rows  # Map robot to row (difficulty level)
-            col_idx = 0  # Always use first column (we only have 1 column of balancing beams)
+            row_idx = (i // terrain_num_cols) % terrain_num_rows  # Difficulty level
+            col_idx = i % terrain_num_cols  # Terrain type
             
             # Get the origin for this terrain cell [row_idx, col_idx]
             terrain_origin = torch.from_numpy(env.terrain.env_origins[row_idx, col_idx]).to(env.device).to(torch.float)
@@ -126,6 +132,10 @@ def play(args):
             # Reset robot state to this new origin
             env.root_states[i, :3] = env.env_origins[i]
             env.root_states[i, :2] += torch_rand_float(-0.5, 0.5, (2,1), device=env.device).squeeze(1) # Add slight noise
+            
+            difficulty_val = row_idx / (terrain_num_rows - 1) if terrain_num_rows > 1 else 0.5
+            terrain_name = {0: 'Beams', 1: 'Stones', 2: 'Stepping'}[col_idx]
+            print(f"  Robot {i}: row={row_idx} (diff={difficulty_val:.3f}), col={col_idx} ({terrain_name})")
     
     # Trigger a reset to apply the new root states
     obs, critic_obs = env.reset()
@@ -141,7 +151,7 @@ def play(args):
     logger = Logger(env.dt)
     robot_index = 0 # which robot is used for logging
     joint_index = 1 # which joint is used for logging
-    stop_state_log = 1200 # number of steps before plotting states
+    stop_state_log = 1200000 # number of steps before plotting states
     if RENDER:
         camera_properties = gymapi.CameraProperties()
         camera_properties.width = 1920
@@ -222,4 +232,5 @@ if __name__ == '__main__':
     FIX_COMMAND = True
     args = get_args()
     play(args)
+
 

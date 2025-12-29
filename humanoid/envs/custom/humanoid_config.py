@@ -39,12 +39,14 @@ class XBotLCfg(LeggedRobotCfg):
     """
     class env(LeggedRobotCfg.env):
         # change the observation dim
-        frame_stack = 15
-        c_frame_stack = 3
-        num_single_obs = 47
-        num_observations = int(frame_stack * num_single_obs)
-        single_num_privileged_obs = 73
-        num_privileged_obs = int(c_frame_stack * single_num_privileged_obs)
+        frame_stack = 1  # Paper spec: no frame stacking for actor
+        c_frame_stack = 1  # Critic also no frame stacking, aligned with actor
+        # Paper spec observation: 2(phase) + 3(cmd) + 12(q) + 12(dq) + 12(a_t-1) + 3(omega) + 3(gravity) + 225(heightmap) = 272D
+        num_single_obs = 272
+        num_observations = num_single_obs  # No frame stacking: 272D
+        # Critic now uses the same observation as actor (aligned)
+        single_num_privileged_obs = 272  # Same as actor: 272D
+        num_privileged_obs = single_num_privileged_obs  # No frame stacking: 272D
         num_actions = 12
         num_envs = 4096
         episode_length_s = 24     # episode length in seconds
@@ -75,7 +77,10 @@ class XBotLCfg(LeggedRobotCfg):
         # mesh_type = 'trimesh'
         curriculum = False
         # rough terrain only:
-        measure_heights = False
+        measure_heights = True  # Enable height measurements for terrain perception
+        # Paper spec: 15x15 grid with 0.1m spacing = 1.4m x 1.4m coverage
+        measured_points_x = [-0.7, -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]  # 15 points
+        measured_points_y = [-0.7, -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]  # 15 points
         static_friction = 0.6
         dynamic_friction = 0.6
         terrain_length = 8.
@@ -217,6 +222,8 @@ class XBotLCfg(LeggedRobotCfg):
             dof_vel = -5e-4
             dof_acc = -1e-7
             collision = -1.
+            # terrain
+            foothold = 1.0  # Foothold reward: penalize placing feet on unsafe terrain
 
     class normalization:
         class obs_scales:
@@ -237,7 +244,7 @@ class XBotLCfgPPO(LeggedRobotCfgPPO):
     class policy:
         init_noise_std = 1.0
         actor_hidden_dims = [512, 256, 128]
-        critic_hidden_dims = [768, 256, 128]
+        critic_hidden_dims = [512, 256, 128]  # Same as actor
 
     class algorithm(LeggedRobotCfgPPO.algorithm):
         entropy_coef = 0.001
@@ -263,24 +270,31 @@ class XBotLCfgPPO(LeggedRobotCfgPPO):
         checkpoint = -1  # -1 = last saved model
         resume_path = None  # updated from load_run and chkpt
 
-class XBotLBalancingBeamsCfg(XBotLCfg):
+class XBotLStoneCfg(XBotLCfg):
     class terrain(XBotLCfg.terrain):
         mesh_type = 'trimesh'
-        curriculum = False
-        selected = True
-        terrain_kwargs = {
-            'type': 'balancing_beams_terrain',
-            'terrain_kwargs': {'difficulty': 0.8}
-        }
-        # Increase resolution for thin beams - 2cm for training
-        horizontal_scale = 0.02
-        # Terrain dimensions with borders: 2.5m × 8.5m (2m × 8m effective + 0.25m borders)
-        terrain_width = 2.5
-        terrain_length = 8.5
-        # Use single terrain for cleaner demo/training
-        num_rows = 1
+        # Enable curriculum mode for progressive difficulty
+        curriculum = True
+        max_init_terrain_level = 4  # Max difficulty level for initialization
+        
+        # Curriculum layout: 9 difficulty levels × 1 terrain type (stones everywhere)
+        # num_rows = difficulty levels (0-8), num_cols = terrain type instances
+        num_rows = 9
         num_cols = 1
+        
+        # Increase resolution for stone details - 2cm for training
+        horizontal_scale = 0.02
+        # Terrain dimensions: 8.5m × 8.5m (8m × 8m effective + 0.25m borders)
+        terrain_width = 8.5
+        terrain_length = 8.5
+        border_size = 5
+        
+        # Terrain proportions: only load "stones everywhere" terrain
+        # Proportions array: [flat, obstacles, uniform, slope+, slope-, stairs+, stairs-, beams, stones, stepping]
+        # Set only stones (index 8) to 1.0, all others to 0
+        terrain_proportions = [0, 0, 0, 0, 0, 0, 0, 0, 1.0, 0.0]
 
-class XBotLBalancingBeamsCfgPPO(XBotLCfgPPO):
+class XBotLStoneCfgPPO(XBotLCfgPPO):
     class runner(XBotLCfgPPO.runner):
-        experiment_name = 'XBot_balancing_beams_ppo'
+        experiment_name = 'XBot_stones_ppo'
+        num_steps_per_env = 100
