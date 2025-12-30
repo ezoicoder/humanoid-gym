@@ -216,7 +216,8 @@ class XBotLFreeEnv(LeggedRobot):
         
         diff = self.dof_pos - self.ref_dof_pos
 
-        self.privileged_obs_buf = torch.cat((
+        # Single-step critic observation (will be time-stacked below)
+        privileged_obs_now = torch.cat((
             self.command_input,  # 2 + 3
             (self.dof_pos - self.default_joint_pd_target) * \
             self.obs_scales.dof_pos,  # 12
@@ -234,7 +235,8 @@ class XBotLFreeEnv(LeggedRobot):
             contact_mask,  # 2
         ), dim=-1)
 
-        obs_buf = torch.cat((
+        # Single-step actor proprio observation (will be time-stacked below)
+        proprio_obs_now = torch.cat((
             self.command_input,  # 5 = 2D(sin cos) + 3D(vel_x, vel_y, aug_vel_yaw)
             q,    # 12D
             dq,  # 12D
@@ -243,23 +245,43 @@ class XBotLFreeEnv(LeggedRobot):
             self.base_euler_xyz * self.obs_scales.quat,  # 3
         ), dim=-1)
 
-        if self.cfg.terrain.measure_heights:
-            heights = torch.clip(self.root_states[:, 2].unsqueeze(1) - 0.5 - self.measured_heights, -1, 1.) * self.obs_scales.height_measurements
-            self.privileged_obs_buf = torch.cat((self.obs_buf, heights), dim=-1)
-        
+        # Optional: append a NON-stacked terrain elevation map (current step only).
+        # This is enabled in cfg via env.use_terrain_height_map. The terrain sampling itself
+        # is controlled by cfg.terrain.measure_heights and handled in the base class.
+        use_height_map = bool(getattr(self.cfg.env, "use_terrain_height_map", False))
+        height_map = None
+        if use_height_map:
+            # measured_heights is computed in LeggedRobot._post_physics_step_callback when measure_heights=True
+            if isinstance(self.measured_heights, torch.Tensor):
+                mh = self.measured_heights
+            else:
+                # At init/reset, measured_heights may be a scalar placeholder.
+                mh = torch.zeros((self.num_envs, getattr(self, "num_height_points", 0)), device=self.device)
+            if mh.ndim == 1:
+                mh = mh.view(self.num_envs, -1)
+            # Normalize to a bounded range
+            height_map = torch.clip(self.root_states[:, 2].unsqueeze(1) - 0.5 - mh, -1.0, 1.0) * self.obs_scales.height_measurements
+
         if self.add_noise:  
-            obs_now = obs_buf.clone() + torch.randn_like(obs_buf) * self.noise_scale_vec * self.cfg.noise.noise_level
+            obs_now = proprio_obs_now.clone() + torch.randn_like(proprio_obs_now) * self.noise_scale_vec * self.cfg.noise.noise_level
         else:
-            obs_now = obs_buf.clone()
+            obs_now = proprio_obs_now.clone()
         self.obs_history.append(obs_now)
-        self.critic_history.append(self.privileged_obs_buf)
+        self.critic_history.append(privileged_obs_now)
 
 
         obs_buf_all = torch.stack([self.obs_history[i]
                                    for i in range(self.obs_history.maxlen)], dim=1)  # N,T,K
 
+        # Actor: time-stacked proprio
         self.obs_buf = obs_buf_all.reshape(self.num_envs, -1)  # N, T*K
+        # Critic: time-stacked privileged proprio
         self.privileged_obs_buf = torch.cat([self.critic_history[i] for i in range(self.cfg.env.c_frame_stack)], dim=1)
+
+        # Append current-step terrain height map (not stacked) to both buffers.
+        if height_map is not None:
+            self.obs_buf = torch.cat((self.obs_buf, height_map), dim=-1)
+            self.privileged_obs_buf = torch.cat((self.privileged_obs_buf, height_map), dim=-1)
 
     def reset_idx(self, env_ids):
         super().reset_idx(env_ids)

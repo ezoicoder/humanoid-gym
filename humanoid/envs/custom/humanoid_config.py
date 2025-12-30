@@ -32,6 +32,18 @@
 
 from humanoid.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
 
+# ---------------- Virtual hazards (fake pits/columns) observation ----------------
+# NOTE: If you change the point grids below, you must also update the derived obs dims.
+VIRTUAL_HAZARD_POINTS_X = [0.2, 0.4, 0.6, 0.8, 1.0]
+VIRTUAL_HAZARD_POINTS_Y = [-0.4, -0.2, 0.0, 0.2, 0.4]
+VIRTUAL_HAZARD_OBS_DIM = len(VIRTUAL_HAZARD_POINTS_X) * len(VIRTUAL_HAZARD_POINTS_Y)
+
+# ---------------- Terrain elevation map (robot-centric) observation ----------------
+# BeamDojo-style perceptive observation: a local elevation grid around the robot.
+TERRAIN_MAP_SIDE = 15
+TERRAIN_MAP_RESOLUTION = 0.1  # meters
+TERRAIN_MAP_OBS_DIM = TERRAIN_MAP_SIDE * TERRAIN_MAP_SIDE
+
 
 class XBotLCfg(LeggedRobotCfg):
     """
@@ -41,6 +53,10 @@ class XBotLCfg(LeggedRobotCfg):
         # change the observation dim
         frame_stack = 15
         c_frame_stack = 3
+        # Base proprio observation used by XBotLFreeEnv.compute_observations()
+        # NOTE: If you add items to the single-step obs structure, you must update:
+        # - humanoid/envs/custom/humanoid_env.py::XBotLFreeEnv.compute_observations
+        # - humanoid/envs/custom/humanoid_env.py::_get_noise_scale_vec
         num_single_obs = 47
         num_observations = int(frame_stack * num_single_obs)
         single_num_privileged_obs = 73
@@ -87,6 +103,23 @@ class XBotLCfg(LeggedRobotCfg):
         # Adjusted to include balancing beams (last element)
         terrain_proportions = [0.1, 0.1, 0.3, 0.1, 0.1, 0.1, 0.1, 0.1]
         restitution = 0.
+
+    class virtual_hazards:
+        """Virtual hazards (fake pits) used for 2-stage training.
+
+        - They do NOT exist in physics (robot won't fall).
+        - They ARE exposed via observation (height-map at fixed points) and reward penalty.
+        """
+        enabled = True
+        # grid in base yaw frame; +x is forward
+        points_x = VIRTUAL_HAZARD_POINTS_X
+        points_y = VIRTUAL_HAZARD_POINTS_Y
+        # per-env random pits
+        num_hazards = 3
+        center_x_range = [0.6, 2.0]   # meters, relative to env origin
+        center_y_range = [-0.8, 0.8]  # meters, relative to env origin
+        radius_range = [0.12, 0.30]   # meters
+        depth_range = [0.12, 0.30]    # meters (mapped to negative heights)
 
     class noise:
         add_noise = True
@@ -217,6 +250,22 @@ class XBotLCfg(LeggedRobotCfg):
             dof_vel = -5e-4
             dof_acc = -1e-7
             collision = -1.
+            # virtual hazards (fake pits): disabled by default (reward term not implemented in XBotLFreeEnv)
+            virtual_hazard = 0.0
+
+class XBotLStage1Cfg(XBotLCfg):
+    """Stage 1: flat ground, straight walking commands, with virtual hazards in observation/reward."""
+    class commands(XBotLCfg.commands):
+        heading_command = False
+        class ranges(XBotLCfg.commands.ranges):
+            lin_vel_x = [0.25, 0.55]
+            lin_vel_y = [0.0, 0.0]
+            ang_vel_yaw = [0.0, 0.0]
+            heading = [0.0, 0.0]
+
+class XBotLStage2Cfg(XBotLCfg):
+    """Stage 2: restore full command distribution (still on plane by default)."""
+    pass
 
     class normalization:
         class obs_scales:
@@ -263,10 +312,33 @@ class XBotLCfgPPO(LeggedRobotCfgPPO):
         checkpoint = -1  # -1 = last saved model
         resume_path = None  # updated from load_run and chkpt
 
+class XBotLStage1CfgPPO(XBotLCfgPPO):
+    class runner(XBotLCfgPPO.runner):
+        experiment_name = 'XBot_ppo_stage1'
+        max_iterations = 1200
+
+class XBotLStage2CfgPPO(XBotLCfgPPO):
+    class runner(XBotLCfgPPO.runner):
+        experiment_name = 'XBot_ppo_stage2'
+
 class XBotLBalancingBeamsCfg(XBotLCfg):
+    class env(XBotLCfg.env):
+        # Append a non-stacked terrain elevation map (current step only) to BOTH actor and critic observations.
+        use_terrain_height_map = True
+        terrain_height_map_size = TERRAIN_MAP_OBS_DIM
+        # Actor obs: (frame_stack * num_single_obs) + terrain_height_map_size
+        num_observations = int(XBotLCfg.env.frame_stack * XBotLCfg.env.num_single_obs) + terrain_height_map_size
+        # Critic obs: (c_frame_stack * single_num_privileged_obs) + terrain_height_map_size
+        num_privileged_obs = int(XBotLCfg.env.c_frame_stack * XBotLCfg.env.single_num_privileged_obs) + terrain_height_map_size
+
     class terrain(XBotLCfg.terrain):
         mesh_type = 'trimesh'
         curriculum = False
+        # Enable terrain height sampling (used by the elevation map appended to observations)
+        measure_heights = True
+        # 15x15 grid centered on the robot (base yaw frame), 0.1m spacing: [-0.7, ..., 0.7]
+        measured_points_x = [-0.7, -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
+        measured_points_y = [-0.7, -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
         selected = True
         terrain_kwargs = {
             'type': 'balancing_beams_terrain',
