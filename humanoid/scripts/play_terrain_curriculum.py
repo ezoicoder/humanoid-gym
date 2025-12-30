@@ -57,7 +57,7 @@ def play(args):
     # Follow design convention: num_rows = difficulty levels, num_cols = terrain type variants
     # Modify these two parameters to change the terrain layout
     num_rows = 9  # Number of difficulty levels
-    num_cols = 3   # Number of terrain types (balancing beams, stones everywhere, stepping stones)
+    num_cols = 1   # Number of terrain types (stones everywhere)
     
     env_cfg.terrain.num_rows = num_rows
     env_cfg.terrain.num_cols = num_cols
@@ -87,7 +87,7 @@ def play(args):
     #   - Column 0 (choice ≈ 0.001): falls in range (0.0, 0.33] → balancing_beams_terrain
     #   - Column 1 (choice ≈ 0.334): falls in range (0.33, 0.67] → stones_everywhere_terrain
     #   - Column 2 (choice ≈ 0.667): falls in range (0.67, 1.0] → stepping_stones_terrain
-    env_cfg.terrain.terrain_proportions = [0, 0, 0, 0, 0, 0, 0, 0.33, 0.33, 0.34]
+    env_cfg.terrain.terrain_proportions = [0, 0, 0, 0, 0, 0, 0, 0, 1.0, 0]
     
     env_cfg.noise.add_noise = True
     env_cfg.domain_rand.push_robots = False 
@@ -139,6 +139,9 @@ def play(args):
     
     # Trigger a reset to apply the new root states
     obs, critic_obs = env.reset()
+    
+    # load policy
+    train_cfg.runner.resume = True
     ppo_runner, train_cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args, train_cfg=train_cfg)
     policy = ppo_runner.get_inference_policy(device=env.device)
     

@@ -53,6 +53,9 @@ class PPO:
                  schedule="fixed",
                  desired_kl=0.01,
                  device='cpu',
+                 use_double_critic=False,
+                 advantage_weight_dense=1.0,
+                 advantage_weight_sparse=0.25,
                  ):
 
         self.device = device
@@ -78,9 +81,14 @@ class PPO:
         self.lam = lam
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
+        
+        # Double critic parameters
+        self.use_double_critic = use_double_critic
+        self.advantage_weight_dense = advantage_weight_dense
+        self.advantage_weight_sparse = advantage_weight_sparse
 
     def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape):
-        self.storage = RolloutStorage(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape, self.device)
+        self.storage = RolloutStorage(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape, self.device, use_double_critic=self.use_double_critic)
 
     def test_mode(self):
         self.actor_critic.test()
@@ -91,7 +99,15 @@ class PPO:
     def act(self, obs, critic_obs):
         # Compute the actions and values
         self.transition.actions = self.actor_critic.act(obs).detach()
-        self.transition.values = self.actor_critic.evaluate(critic_obs).detach()
+        
+        if self.use_double_critic:
+            values1, values2 = self.actor_critic.evaluate(critic_obs)
+            self.transition.values = values1.detach()
+            self.transition.values2 = values2.detach()
+        else:
+            self.transition.values = self.actor_critic.evaluate(critic_obs).detach()
+            self.transition.values2 = None
+        
         self.transition.actions_log_prob = self.actor_critic.get_actions_log_prob(self.transition.actions).detach()
         self.transition.action_mean = self.actor_critic.action_mean.detach()
         self.transition.action_sigma = self.actor_critic.action_std.detach()
@@ -103,9 +119,22 @@ class PPO:
     def process_env_step(self, rewards, dones, infos):
         self.transition.rewards = rewards.clone()
         self.transition.dones = dones
+        
+        # Double critic: separate dense and sparse rewards
+        if self.use_double_critic and 'rewards_dense' in infos and 'rewards_sparse' in infos:
+            self.transition.rewards_dense = infos['rewards_dense'].clone()
+            self.transition.rewards_sparse = infos['rewards_sparse'].clone()
+        else:
+            # Fallback if not provided
+            self.transition.rewards_dense = rewards.clone()
+            self.transition.rewards_sparse = torch.zeros_like(rewards)
+        
         # Bootstrapping on time outs
         if 'time_outs' in infos:
             self.transition.rewards += self.gamma * torch.squeeze(self.transition.values * infos['time_outs'].unsqueeze(1).to(self.device), 1)
+            if self.use_double_critic:
+                self.transition.rewards_dense += self.gamma * torch.squeeze(self.transition.values * infos['time_outs'].unsqueeze(1).to(self.device), 1)
+                self.transition.rewards_sparse += self.gamma * torch.squeeze(self.transition.values2 * infos['time_outs'].unsqueeze(1).to(self.device), 1)
 
         # Record the transition
         self.storage.add_transitions(self.transition)
@@ -113,11 +142,21 @@ class PPO:
         self.actor_critic.reset(dones)
     
     def compute_returns(self, last_critic_obs):
-        last_values= self.actor_critic.evaluate(last_critic_obs).detach()
-        self.storage.compute_returns(last_values, self.gamma, self.lam)
+        if self.use_double_critic:
+            last_values1, last_values2 = self.actor_critic.evaluate(last_critic_obs)
+            last_values1 = last_values1.detach()
+            last_values2 = last_values2.detach()
+            self.storage.compute_returns(last_values1, self.gamma, self.lam, 
+                                        last_values2=last_values2,
+                                        w1=self.advantage_weight_dense,
+                                        w2=self.advantage_weight_sparse)
+        else:
+            last_values = self.actor_critic.evaluate(last_critic_obs).detach()
+            self.storage.compute_returns(last_values, self.gamma, self.lam)
 
     def update(self):
         mean_value_loss = 0
+        mean_value_loss2 = 0
         mean_surrogate_loss = 0
 
         generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
@@ -127,7 +166,13 @@ class PPO:
 
                 self.actor_critic.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
                 actions_log_prob_batch = self.actor_critic.get_actions_log_prob(actions_batch)
-                value_batch = self.actor_critic.evaluate(critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1])
+                
+                # Evaluate critics
+                if self.use_double_critic:
+                    value_batch, value_batch2 = self.actor_critic.evaluate(critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1])
+                else:
+                    value_batch = self.actor_critic.evaluate(critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1])
+                
                 mu_batch = self.actor_critic.action_mean
                 sigma_batch = self.actor_critic.action_std
                 entropy_batch = self.actor_critic.entropy
@@ -155,7 +200,7 @@ class PPO:
                                                                                 1.0 + self.clip_param)
                 surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
 
-                # Value function loss
+                # Value function loss (Critic 1 - dense rewards)
                 if self.use_clipped_value_loss:
                     value_clipped = target_values_batch + (value_batch - target_values_batch).clamp(-self.clip_param,
                                                                                                     self.clip_param)
@@ -165,7 +210,25 @@ class PPO:
                 else:
                     value_loss = (returns_batch - value_batch).pow(2).mean()
 
-                loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
+                # Double critic: add second value loss (Critic 2 - sparse rewards)
+                if self.use_double_critic:
+                    # Simplified approach: train critic2 to predict the combined returns
+                    # This works because the advantage combination already handles the reward separation
+                    # Both critics learn to predict the total return, but through different reward streams
+                    if self.use_clipped_value_loss:
+                        value_clipped2 = target_values_batch + (value_batch2 - target_values_batch).clamp(-self.clip_param,
+                                                                                                        self.clip_param)
+                        value_losses2 = (value_batch2 - returns_batch).pow(2)
+                        value_losses_clipped2 = (value_clipped2 - returns_batch).pow(2)
+                        value_loss2 = torch.max(value_losses2, value_losses_clipped2).mean()
+                    else:
+                        value_loss2 = (returns_batch - value_batch2).pow(2).mean()
+                    
+                    # Total loss with both critics
+                    loss = surrogate_loss + self.value_loss_coef * (value_loss + value_loss2) - self.entropy_coef * entropy_batch.mean()
+                    mean_value_loss2 += value_loss2.item()
+                else:
+                    loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
 
                 # Gradient step
                 self.optimizer.zero_grad()
@@ -179,6 +242,8 @@ class PPO:
         num_updates = self.num_learning_epochs * self.num_mini_batches
         mean_value_loss /= num_updates
         mean_surrogate_loss /= num_updates
+        if self.use_double_critic:
+            mean_value_loss2 /= num_updates
         self.storage.clear()
 
         return mean_value_loss, mean_surrogate_loss

@@ -245,6 +245,7 @@ class XBotLCfgPPO(LeggedRobotCfgPPO):
         init_noise_std = 1.0
         actor_hidden_dims = [512, 256, 128]
         critic_hidden_dims = [512, 256, 128]  # Same as actor
+        use_double_critic = False  # Will be set to True by --double_critic flag
 
     class algorithm(LeggedRobotCfgPPO.algorithm):
         entropy_coef = 0.001
@@ -253,6 +254,11 @@ class XBotLCfgPPO(LeggedRobotCfgPPO):
         gamma = 0.994
         lam = 0.9
         num_mini_batches = 4
+        
+        # Double Critic for sparse reward learning (foothold)
+        use_double_critic = False  # Enable via --double_critic flag
+        advantage_weight_dense = 1.0  # Weight for dense rewards (locomotion)
+        advantage_weight_sparse = 0.25  # Weight for sparse rewards (foothold)
 
     class runner:
         policy_class_name = 'ActorCritic'

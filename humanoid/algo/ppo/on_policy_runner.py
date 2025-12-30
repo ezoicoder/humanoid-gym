@@ -288,7 +288,26 @@ class OnPolicyRunner:
 
     def load(self, path, load_optimizer=True):
         loaded_dict = torch.load(path)
-        self.alg.actor_critic.load_state_dict(loaded_dict["model_state_dict"])
+        
+        # Try to load state dict, handle missing keys for double critic
+        try:
+            self.alg.actor_critic.load_state_dict(loaded_dict["model_state_dict"])
+        except RuntimeError as e:
+            if "critic2" in str(e):
+                print("⚠️  Warning: Loading model without critic2 (old single-critic model)")
+                print("   → Initializing critic2 with critic1's weights")
+                
+                # Load with strict=False to ignore missing critic2 parameters
+                self.alg.actor_critic.load_state_dict(loaded_dict["model_state_dict"], strict=False)
+                
+                # Copy critic1 weights to critic2
+                if hasattr(self.alg.actor_critic, 'critic2') and self.alg.actor_critic.critic2 is not None:
+                    critic1_state = self.alg.actor_critic.critic.state_dict()
+                    self.alg.actor_critic.critic2.load_state_dict(critic1_state)
+                    print("   ✓ Critic2 initialized from critic1 (same starting point)")
+            else:
+                raise e
+        
         if load_optimizer:
             self.alg.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
         self.current_learning_iteration = loaded_dict["iter"]

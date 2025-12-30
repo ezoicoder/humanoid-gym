@@ -41,11 +41,13 @@ class ActorCritic(nn.Module):
                         critic_hidden_dims=[256, 256, 256],
                         init_noise_std=1.0,
                         activation = nn.ELU(),
+                        use_double_critic=False,
                         **kwargs):
         if kwargs:
             print("ActorCritic.__init__ got unexpected arguments, which will be ignored: " + str([key for key in kwargs.keys()]))
         super(ActorCritic, self).__init__()
 
+        self.use_double_critic = use_double_critic
 
         mlp_input_dim_a = num_actor_obs
         mlp_input_dim_c = num_critic_obs
@@ -61,7 +63,7 @@ class ActorCritic(nn.Module):
                 actor_layers.append(activation)
         self.actor = nn.Sequential(*actor_layers)
 
-        # Value function
+        # Value function (Critic 1 - for dense rewards)
         critic_layers = []
         critic_layers.append(nn.Linear(mlp_input_dim_c, critic_hidden_dims[0]))
         critic_layers.append(activation)
@@ -73,8 +75,26 @@ class ActorCritic(nn.Module):
                 critic_layers.append(activation)
         self.critic = nn.Sequential(*critic_layers)
 
+        # Second value function (Critic 2 - for sparse rewards)
+        if self.use_double_critic:
+            critic2_layers = []
+            critic2_layers.append(nn.Linear(mlp_input_dim_c, critic_hidden_dims[0]))
+            critic2_layers.append(activation)
+            for l in range(len(critic_hidden_dims)):
+                if l == len(critic_hidden_dims) - 1:
+                    critic2_layers.append(nn.Linear(critic_hidden_dims[l], 1))
+                else:
+                    critic2_layers.append(nn.Linear(critic_hidden_dims[l], critic_hidden_dims[l + 1]))
+                    critic2_layers.append(activation)
+            self.critic2 = nn.Sequential(*critic2_layers)
+        else:
+            self.critic2 = None
+
         print(f"Actor MLP: {self.actor}")
         print(f"Critic MLP: {self.critic}")
+        if self.use_double_critic:
+            print(f"Critic2 MLP (for sparse rewards): {self.critic2}")
+            print("✓ Double Critic successfully created!")
 
         # Action noise
         self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
@@ -125,4 +145,7 @@ class ActorCritic(nn.Module):
 
     def evaluate(self, critic_observations, **kwargs):
         value = self.critic(critic_observations)
+        if self.use_double_critic:
+            value2 = self.critic2(critic_observations)
+            return value, value2
         return value

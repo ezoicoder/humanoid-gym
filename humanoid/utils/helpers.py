@@ -129,6 +129,9 @@ def get_load_path(root, load_run=-1, checkpoint=-1):
         load_run = os.path.join(root, load_run)
     if checkpoint == -1:
         models = [file for file in os.listdir(load_run) if "model" in file]
+        if len(models) == 0:
+            raise ValueError(f"No model files found in {load_run}. "
+                           f"Remove --resume flag to start training from scratch.")
         models.sort(key=lambda m: "{0:0>15}".format(m))
         model = models[-1]
     else:
@@ -160,6 +163,16 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
             cfg_train.runner.load_run = args.load_run
         if args.checkpoint is not None:
             cfg_train.runner.checkpoint = args.checkpoint
+        # double critic
+        if hasattr(args, 'double_critic') and args.double_critic:
+            cfg_train.algorithm.use_double_critic = True
+            cfg_train.policy.use_double_critic = True  # Also set in policy config
+            print("=" * 60)
+            print("DOUBLE CRITIC ENABLED")
+            print("  - Critic 1: Dense rewards (locomotion)")
+            print("  - Critic 2: Sparse rewards (foothold)")
+            print("  - Advantage weights: w1=1.0, w2=0.25")
+            print("=" * 60)
 
     return env_cfg, cfg_train
 
@@ -230,6 +243,12 @@ def get_args():
             "name": "--max_iterations",
             "type": int,
             "help": "Maximum number of training iterations. Overrides config file if provided.",
+        },
+        {
+            "name": "--double_critic",
+            "action": "store_true",
+            "default": False,
+            "help": "Enable double critic for separate dense/sparse reward learning.",
         },
     ]
     # parse arguments

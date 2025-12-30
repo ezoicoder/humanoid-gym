@@ -106,6 +106,10 @@ class LeggedRobot(BaseTask):
         self.obs_buf = torch.clip(self.obs_buf, -clip_obs, clip_obs)
         if self.privileged_obs_buf is not None:
             self.privileged_obs_buf = torch.clip(self.privileged_obs_buf, -clip_obs, clip_obs)
+        # Add separated rewards to extras for double critic
+        self.extras['rewards_dense'] = self.rew_buf_dense
+        self.extras['rewards_sparse'] = self.rew_buf_sparse
+        
         return self.obs_buf, self.privileged_obs_buf, self.rew_buf, self.reset_buf, self.extras
 
 
@@ -218,20 +222,38 @@ class LeggedRobot(BaseTask):
         """ Compute rewards
             Calls each reward function which had a non-zero scale (processed in self._prepare_reward_function())
             adds each terms to the episode sums and to the total reward
+            
+            For double critic mode:
+            - Separates rewards into dense (locomotion) and sparse (foothold)
+            - Dense rewards: all rewards except 'foothold'
+            - Sparse rewards: only 'foothold' reward
         """
         self.rew_buf[:] = 0.
+        self.rew_buf_dense[:] = 0.
+        self.rew_buf_sparse[:] = 0.
 
         for i in range(len(self.reward_functions)):
             name = self.reward_names[i]
             rew = self.reward_functions[i]() * self.reward_scales[name]
             self.rew_buf += rew
             self.episode_sums[name] += rew
+            
+            # Separate rewards for double critic
+            if name == 'foothold':
+                self.rew_buf_sparse += rew  # Sparse reward (foothold)
+            else:
+                self.rew_buf_dense += rew   # Dense rewards (all others)
+        
         if self.cfg.rewards.only_positive_rewards:
             self.rew_buf[:] = torch.clip(self.rew_buf[:], min=0.)
+            self.rew_buf_dense[:] = torch.clip(self.rew_buf_dense[:], min=0.)
+            self.rew_buf_sparse[:] = torch.clip(self.rew_buf_sparse[:], min=0.)
+        
         # add termination reward after clipping
         if "termination" in self.reward_scales:
             rew = self._reward_termination() * self.reward_scales["termination"]
             self.rew_buf += rew
+            self.rew_buf_dense += rew  # Termination is a dense reward
             self.episode_sums["termination"] += rew
 
     def set_camera(self, position, lookat):

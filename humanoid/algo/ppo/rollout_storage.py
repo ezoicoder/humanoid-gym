@@ -45,13 +45,18 @@ class RolloutStorage:
             self.action_mean = None
             self.action_sigma = None
             self.hidden_states = None
+            # Double critic additions
+            self.rewards_dense = None
+            self.rewards_sparse = None
+            self.values2 = None
         
         def clear(self):
             self.__init__()
 
-    def __init__(self, num_envs, num_transitions_per_env, obs_shape, privileged_obs_shape, actions_shape, device='cpu'):
+    def __init__(self, num_envs, num_transitions_per_env, obs_shape, privileged_obs_shape, actions_shape, device='cpu', use_double_critic=False):
 
         self.device = device
+        self.use_double_critic = use_double_critic
 
         self.obs_shape = obs_shape
         self.privileged_obs_shape = privileged_obs_shape
@@ -75,6 +80,14 @@ class RolloutStorage:
         self.mu = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
         self.sigma = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
 
+        # Double critic additions
+        if self.use_double_critic:
+            self.rewards_dense = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
+            self.rewards_sparse = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
+            self.values2 = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
+            self.returns2 = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
+            self.advantages2 = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
+
         self.num_transitions_per_env = num_transitions_per_env
         self.num_envs = num_envs
 
@@ -96,6 +109,13 @@ class RolloutStorage:
         self.actions_log_prob[self.step].copy_(transition.actions_log_prob.view(-1, 1))
         self.mu[self.step].copy_(transition.action_mean)
         self.sigma[self.step].copy_(transition.action_sigma)
+        
+        # Double critic additions
+        if self.use_double_critic:
+            self.rewards_dense[self.step].copy_(transition.rewards_dense.view(-1, 1))
+            self.rewards_sparse[self.step].copy_(transition.rewards_sparse.view(-1, 1))
+            self.values2[self.step].copy_(transition.values2)
+        
         self._save_hidden_states(transition.hidden_states)
         self.step += 1
 
@@ -119,21 +139,74 @@ class RolloutStorage:
     def clear(self):
         self.step = 0
 
-    def compute_returns(self, last_values, gamma, lam):
-        advantage = 0
-        for step in reversed(range(self.num_transitions_per_env)):
-            if step == self.num_transitions_per_env - 1:
-                next_values = last_values
-            else:
-                next_values = self.values[step + 1]
-            next_is_not_terminal = 1.0 - self.dones[step].float()
-            delta = self.rewards[step] + next_is_not_terminal * gamma * next_values - self.values[step]
-            advantage = delta + next_is_not_terminal * gamma * lam * advantage
-            self.returns[step] = advantage + self.values[step]
+    def compute_returns(self, last_values, gamma, lam, last_values2=None, w1=1.0, w2=0.25):
+        """
+        Compute returns and advantages using GAE.
+        
+        For double critic mode:
+        - Computes separate advantages for dense (A1) and sparse (A2) rewards
+        - Normalizes each advantage independently
+        - Combines them with weights: A_total = w1 * A1_norm + w2 * A2_norm
+        
+        Args:
+            last_values: Value estimates for the last state (critic 1)
+            gamma: Discount factor
+            lam: GAE lambda parameter
+            last_values2: Value estimates for the last state (critic 2, for sparse rewards)
+            w1: Weight for dense advantage (default: 1.0)
+            w2: Weight for sparse advantage (default: 0.25)
+        """
+        if self.use_double_critic and last_values2 is not None:
+            # Compute advantage for dense rewards (A1)
+            advantage1 = 0
+            for step in reversed(range(self.num_transitions_per_env)):
+                if step == self.num_transitions_per_env - 1:
+                    next_values1 = last_values
+                else:
+                    next_values1 = self.values[step + 1]
+                next_is_not_terminal = 1.0 - self.dones[step].float()
+                delta1 = self.rewards_dense[step] + next_is_not_terminal * gamma * next_values1 - self.values[step]
+                advantage1 = delta1 + next_is_not_terminal * gamma * lam * advantage1
+                self.returns[step] = advantage1 + self.values[step]
+            
+            # Compute advantage for sparse rewards (A2)
+            advantage2 = 0
+            for step in reversed(range(self.num_transitions_per_env)):
+                if step == self.num_transitions_per_env - 1:
+                    next_values2 = last_values2
+                else:
+                    next_values2 = self.values2[step + 1]
+                next_is_not_terminal = 1.0 - self.dones[step].float()
+                delta2 = self.rewards_sparse[step] + next_is_not_terminal * gamma * next_values2 - self.values2[step]
+                advantage2 = delta2 + next_is_not_terminal * gamma * lam * advantage2
+                self.returns2[step] = advantage2 + self.values2[step]
+            
+            # Compute raw advantages
+            self.advantages = self.returns - self.values
+            self.advantages2 = self.returns2 - self.values2
+            
+            # Normalize each advantage independently
+            adv1_norm = (self.advantages - self.advantages.mean()) / (self.advantages.std() + 1e-8)
+            adv2_norm = (self.advantages2 - self.advantages2.mean()) / (self.advantages2.std() + 1e-8)
+            
+            # Combine advantages with weights
+            self.advantages = w1 * adv1_norm + w2 * adv2_norm
+        else:
+            # Standard single critic mode
+            advantage = 0
+            for step in reversed(range(self.num_transitions_per_env)):
+                if step == self.num_transitions_per_env - 1:
+                    next_values = last_values
+                else:
+                    next_values = self.values[step + 1]
+                next_is_not_terminal = 1.0 - self.dones[step].float()
+                delta = self.rewards[step] + next_is_not_terminal * gamma * next_values - self.values[step]
+                advantage = delta + next_is_not_terminal * gamma * lam * advantage
+                self.returns[step] = advantage + self.values[step]
 
-        # Compute and normalize the advantages
-        self.advantages = self.returns - self.values
-        self.advantages = (self.advantages - self.advantages.mean()) / (self.advantages.std() + 1e-8)
+            # Compute and normalize the advantages
+            self.advantages = self.returns - self.values
+            self.advantages = (self.advantages - self.advantages.mean()) / (self.advantages.std() + 1e-8)
 
     def get_statistics(self):
         done = self.dones
