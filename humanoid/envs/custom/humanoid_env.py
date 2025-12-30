@@ -255,6 +255,8 @@ class XBotLFreeEnv(LeggedRobot):
         self.sim = self.gym.create_sim(
             self.sim_device_id, self.graphics_device_id, self.physics_engine, self.sim_params)
         mesh_type = self.cfg.terrain.mesh_type
+        print(f"[DEBUG] Before creating terrain: cfg.terrain.curriculum = {self.cfg.terrain.curriculum}")
+        print(f"[DEBUG] Before creating terrain: cfg.terrain.use_virtual_terrain = {getattr(self.cfg.terrain, 'use_virtual_terrain', 'NOT SET')}")
         if mesh_type in ['heightfield', 'trimesh', 'plane']:
             self.terrain = HumanoidTerrain(self.cfg.terrain, self.num_envs)
         if mesh_type == 'plane':
@@ -875,8 +877,9 @@ class XBotLFreeEnv(LeggedRobot):
         The reward penalizes foot placements where sample points are significantly below
         the expected terrain height, indicating unsafe footholds.
         """
-        # Only compute for heightfield/trimesh terrains
-        if self.cfg.terrain.mesh_type not in ['heightfield', 'trimesh']:
+        # Only compute for heightfield/trimesh terrains, or plane with virtual terrain
+        use_virtual = getattr(self.cfg.terrain, 'use_virtual_terrain', False)
+        if self.cfg.terrain.mesh_type not in ['heightfield', 'trimesh'] and not use_virtual:
             return torch.zeros(self.num_envs, device=self.device)
         
         # 1. Get contact mask (C_i): only check feet that are in contact

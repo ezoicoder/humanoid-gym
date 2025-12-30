@@ -205,8 +205,16 @@ class LeggedRobot(BaseTask):
             self.extras["episode"]['rew_' + key] = torch.mean(self.episode_sums[key][env_ids]) / self.max_episode_length_s
             self.episode_sums[key][env_ids] = 0.
         # log additional curriculum info
-        if self.cfg.terrain.mesh_type == "trimesh":
+        use_virtual = getattr(self.cfg.terrain, 'use_virtual_terrain', False)
+        if self.cfg.terrain.mesh_type in ["trimesh", "heightfield"] or (self.cfg.terrain.mesh_type == "plane" and use_virtual):
+            # Log mean terrain level (row index: 0 to num_rows-1)
             self.extras["episode"]["terrain_level"] = torch.mean(self.terrain_levels.float())
+            # Log mean difficulty (normalized: 0.0 to 1.0)
+            if self.max_terrain_level > 1:
+                mean_difficulty = torch.mean(self.terrain_levels.float()) / (self.max_terrain_level - 1)
+            else:
+                mean_difficulty = torch.mean(self.terrain_levels.float()) / self.max_terrain_level
+            self.extras["episode"]["terrain_difficulty"] = mean_difficulty
         if self.cfg.commands.curriculum:
             self.extras["episode"]["max_command_x"] = self.command_ranges["lin_vel_x"][1]
         # send timeout info to the algorithm
@@ -762,7 +770,9 @@ class LeggedRobot(BaseTask):
         self.obs_scales = self.cfg.normalization.obs_scales
         self.reward_scales = class_to_dict(self.cfg.rewards.scales)
         self.command_ranges = class_to_dict(self.cfg.commands.ranges)
-        if self.cfg.terrain.mesh_type not in ['heightfield', 'trimesh']:
+        # Allow curriculum for heightfield/trimesh, or for plane with virtual terrain
+        use_virtual = getattr(self.cfg.terrain, 'use_virtual_terrain', False)
+        if self.cfg.terrain.mesh_type not in ['heightfield', 'trimesh'] and not use_virtual:
             self.cfg.terrain.curriculum = False
         self.max_episode_length_s = self.cfg.env.episode_length_s
         self.max_episode_length = np.ceil(self.max_episode_length_s / self.dt)

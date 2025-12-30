@@ -48,6 +48,9 @@ class Terrain:
         self.use_virtual_terrain = getattr(cfg, 'use_virtual_terrain', False)
         
         if self.type in ["none", 'plane']:
+
+            print(f"nmd type {self.type}")
+
             # For plane + virtual terrain mode, we need to generate virtual terrain
             if self.type == 'plane' and self.use_virtual_terrain:
                 print("[Terrain] Using plane for physics + virtual terrain for perception")
@@ -212,6 +215,7 @@ class Terrain:
         self.env_origins[i, j] = [env_origin_x, env_origin_y, env_origin_z]
     
     def _init_plane_with_virtual(self, cfg):
+        print(f"fuck init plane virtual")
         """
         Initialize virtual terrain for plane physics mode.
         
@@ -242,6 +246,8 @@ class Terrain:
         # But we need virtual heightfield for perception
         self.height_field_virtual = np.zeros((self.tot_rows, self.tot_cols), dtype=np.int16)
         
+        print(f"fuck plane curiculum {cfg.curriculum}")
+
         # Generate virtual terrain only
         if cfg.curriculum:
             self._curiculum_virtual_only()
@@ -262,6 +268,7 @@ class Terrain:
             for i in range(self.cfg.num_rows):
                 if self.cfg.num_rows > 1:
                     difficulty = i / (self.cfg.num_rows - 1)
+                    # print(f"fuck plane difficulty: {difficulty}")
                 else:
                     difficulty = i / self.cfg.num_rows
                 choice = j / self.cfg.num_cols + 0.001
@@ -660,8 +667,8 @@ def stones_everywhere_stage1_terrain(terrain, difficulty=1):
     mid_y = terrain.length // 2
     
     # Central platform dimensions
-    platform_width = 4  # meters
-    platform_length = 4  # meters
+    platform_width = 1  # meters
+    platform_length = 1  # meters
     
     # Convert parameters to pixels
     stone_size_pixels = int(stone_size / terrain.horizontal_scale)

@@ -90,7 +90,7 @@ class XBotLCfg(LeggedRobotCfg):
         max_init_terrain_level = 10  # starting curriculum state
         # plane; obstacles; uniform; slope_up; slope_down, stair_up, stair_down, balancing_beams
         # Adjusted to include balancing beams (last element)
-        terrain_proportions = [0.1, 0.1, 0.3, 0.1, 0.1, 0.1, 0.1, 0.1]
+        terrain_proportions = [0.1, 0.1, 0.3, 0.1, 0.1, 0.1, 0.2]
         restitution = 0.
 
     class noise:
@@ -326,7 +326,7 @@ class XBotLStoneStage1Cfg(XBotLCfg):
         
         # Curriculum layout: 9 difficulty levels × 1 terrain type (stage1 virtual stones)
         num_rows = 9
-        num_cols = 1
+        num_cols = 9
         
         # Increase resolution for stone details - 2cm for training
         horizontal_scale = 0.02
@@ -362,6 +362,14 @@ class XBotLStoneStage1PlaneCfg(XBotLCfg):
     
     Use this for large-scale training (4096+ envs).
     """
+    class sim(XBotLCfg.sim):
+        class physx(XBotLCfg.sim.physx):
+            # Increase GPU memory for large terrain layouts (9×256 = 2304 terrain positions)
+            # This prevents "foundLostAggregatePairsCapacity" warnings
+            gpu_found_lost_aggregate_pairs_capacity = 16 * 1024 * 1024  # 16M (default is ~1M)
+            gpu_max_rigid_contact_count = 512 * 1024  # 512K
+            gpu_max_rigid_patch_count = 80 * 1024  # 80K
+    
     class terrain(XBotLCfg.terrain):
         mesh_type = 'plane'  # Use simple plane for physics (最快)
         use_virtual_terrain = True  # Enable virtual terrain generation
@@ -372,7 +380,7 @@ class XBotLStoneStage1PlaneCfg(XBotLCfg):
         
         # Curriculum layout: 9 difficulty levels × 1 terrain type
         num_rows = 9
-        num_cols = 1
+        num_cols = 256
         
         # Resolution for virtual terrain
         horizontal_scale = 0.02
