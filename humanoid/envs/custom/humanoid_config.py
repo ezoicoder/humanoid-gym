@@ -304,3 +304,86 @@ class XBotLStoneCfgPPO(XBotLCfgPPO):
     class runner(XBotLCfgPPO.runner):
         experiment_name = 'XBot_stones_ppo'
         num_steps_per_env = 100
+
+class XBotLStoneStage1Cfg(XBotLCfg):
+    """
+    Stage 1 Training Configuration: Flat physical terrain + Virtual stones perception
+    
+    This implements "Stage 1: Soft Terrain Dynamics" from the paper where:
+    - Robot walks on FLAT physical terrain (safe, no falls)
+    - Robot perceives VIRTUAL stones terrain (elevation map)
+    - Foothold reward computed from VIRTUAL stones (sparse reward)
+    - Locomotion rewards computed from FLAT terrain (dense rewards)
+    
+    This allows safe early-stage training where the robot learns terrain-aware
+    behaviors without the risk of termination from falls.
+    """
+    class terrain(XBotLCfg.terrain):
+        mesh_type = 'trimesh'
+        # Enable curriculum mode for progressive difficulty
+        curriculum = True
+        max_init_terrain_level = 4  # Max difficulty level for initialization
+        
+        # Curriculum layout: 9 difficulty levels × 1 terrain type (stage1 virtual stones)
+        num_rows = 9
+        num_cols = 1
+        
+        # Increase resolution for stone details - 2cm for training
+        horizontal_scale = 0.02
+        # Terrain dimensions: 8.5m × 8.5m (8m × 8m effective + 0.25m borders)
+        terrain_width = 8.5
+        terrain_length = 8.5
+        border_size = 5
+        
+        # Terrain proportions: only load "stones_everywhere_stage1" terrain (type 10)
+        # Proportions array: [flat, obstacles, uniform, slope+, slope-, stairs+, stairs-, beams, stones, stepping, stage1_stones]
+        # Set only stage1_stones (index 10) to 1.0, all others to 0
+        terrain_proportions = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.0]
+
+class XBotLStoneStage1CfgPPO(XBotLCfgPPO):
+    class runner(XBotLCfgPPO.runner):
+        experiment_name = 'XBot_stones_stage1_ppo'
+        num_steps_per_env = 100
+
+class XBotLStoneStage1PlaneCfg(XBotLCfg):
+    """
+    Stage 1 Training Configuration (Optimized): Plane physics + Virtual stones perception
+    
+    **PERFORMANCE OPTIMIZED VERSION**
+    
+    This is the recommended configuration for Stage 1 training:
+    - Physical terrain: PLANE (最轻量，无需heightfield/trimesh)
+    - Virtual terrain: stones heightfield (for perception and reward)
+    
+    Advantages over trimesh version:
+    - 🚀 Much faster physics simulation (plane vs trimesh)
+    - 💾 Lower memory usage (no mesh data)
+    - ✅ Same training效果 (robot still perceives virtual stones)
+    
+    Use this for large-scale training (4096+ envs).
+    """
+    class terrain(XBotLCfg.terrain):
+        mesh_type = 'plane'  # Use simple plane for physics (最快)
+        use_virtual_terrain = True  # Enable virtual terrain generation
+        
+        # Enable curriculum mode for progressive difficulty
+        curriculum = True
+        max_init_terrain_level = 4
+        
+        # Curriculum layout: 9 difficulty levels × 1 terrain type
+        num_rows = 9
+        num_cols = 1
+        
+        # Resolution for virtual terrain
+        horizontal_scale = 0.02
+        terrain_width = 8.5
+        terrain_length = 8.5
+        border_size = 5
+        
+        # Terrain proportions: only stage1_stones (type 10)
+        terrain_proportions = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.0]
+
+class XBotLStoneStage1PlaneCfgPPO(XBotLCfgPPO):
+    class runner(XBotLCfgPPO.runner):
+        experiment_name = 'XBot_stones_stage1_plane_ppo'
+        num_steps_per_env = 100

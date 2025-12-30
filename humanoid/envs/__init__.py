@@ -33,7 +33,12 @@
 from humanoid import LEGGED_GYM_ROOT_DIR, LEGGED_GYM_ENVS_DIR
 from .base.legged_robot import LeggedRobot
 
-from .custom.humanoid_config import XBotLCfg, XBotLCfgPPO, XBotLStoneCfg, XBotLStoneCfgPPO
+from .custom.humanoid_config import (
+    XBotLCfg, XBotLCfgPPO, 
+    XBotLStoneCfg, XBotLStoneCfgPPO,
+    XBotLStoneStage1Cfg, XBotLStoneStage1CfgPPO,
+    XBotLStoneStage1PlaneCfg, XBotLStoneStage1PlaneCfgPPO
+)
 from .custom.humanoid_env import XBotLFreeEnv
 
 from humanoid.utils.task_registry import task_registry
@@ -41,3 +46,5 @@ from humanoid.utils.task_registry import task_registry
 
 task_registry.register( "humanoid_ppo", XBotLFreeEnv, XBotLCfg(), XBotLCfgPPO() )
 task_registry.register( "humanoid_stones_ppo", XBotLFreeEnv, XBotLStoneCfg(), XBotLStoneCfgPPO() )
+task_registry.register( "humanoid_stones_stage1_ppo", XBotLFreeEnv, XBotLStoneStage1Cfg(), XBotLStoneStage1CfgPPO() )
+task_registry.register( "humanoid_stones_stage1_plane_ppo", XBotLFreeEnv, XBotLStoneStage1PlaneCfg(), XBotLStoneStage1PlaneCfgPPO() )

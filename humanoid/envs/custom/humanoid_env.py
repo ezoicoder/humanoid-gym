@@ -127,8 +127,9 @@ class XBotLFreeEnv(LeggedRobot):
         - 0: flat, 1: obstacles, 2: random, 3: slope+, 4: slope-
         - 5: stairs+, 6: stairs-, 7: balancing_beams, 8: stones_everywhere
         """
-        if not hasattr(self, 'terrain') or self.cfg.terrain.mesh_type not in ["heightfield", "trimesh"]:
-            print("WARNING: No terrain or not using heightfield/trimesh. Terrain-specific features disabled.")
+        # Check if we have terrain object (supports heightfield/trimesh/plane+virtual)
+        if not hasattr(self, 'terrain'):
+            print("WARNING: No terrain object. Terrain-specific features disabled.")
             self.actual_terrain_types = None
             return
         
@@ -164,7 +165,7 @@ class XBotLFreeEnv(LeggedRobot):
         terrain_names = {
             0: 'flat', 1: 'obstacles', 2: 'random', 3: 'slope+', 4: 'slope-',
             5: 'stairs+', 6: 'stairs-', 7: 'balancing_beams', 8: 'stones_everywhere',
-            9: 'stepping_stones'
+            9: 'stepping_stones', 10: 'stones_everywhere_stage1 (virtual)'
         }
         for t in unique_types:
             count = (self.actual_terrain_types == t).sum().item()
@@ -232,6 +233,19 @@ class XBotLFreeEnv(LeggedRobot):
         self.ref_dof_pos[torch.abs(sin_pos) < 0.1] = 0
 
         self.ref_action = 2 * self.ref_dof_pos
+    
+    def _should_use_virtual_terrain(self):
+        """
+        Check if current environment should use virtual terrain for perception and foothold reward.
+        
+        Returns:
+            bool: True if using virtual terrain (Stage 1 training), False otherwise
+        """
+        # Terrain type 10 = stones_everywhere_stage1 (flat physical + virtual stones)
+        if self.actual_terrain_types is None:
+            return False
+        # For now, we check if ANY environment is type 10 (could be refined per-env if needed)
+        return (self.actual_terrain_types == 10).any().item()
 
 
     def create_sim(self):
@@ -241,7 +255,7 @@ class XBotLFreeEnv(LeggedRobot):
         self.sim = self.gym.create_sim(
             self.sim_device_id, self.graphics_device_id, self.physics_engine, self.sim_params)
         mesh_type = self.cfg.terrain.mesh_type
-        if mesh_type in ['heightfield', 'trimesh']:
+        if mesh_type in ['heightfield', 'trimesh', 'plane']:
             self.terrain = HumanoidTerrain(self.cfg.terrain, self.num_envs)
         if mesh_type == 'plane':
             self._create_ground_plane()
@@ -343,6 +357,10 @@ class XBotLFreeEnv(LeggedRobot):
 
         # Add height map to observations (paper spec: 15x15 elevation map)
         if self.cfg.terrain.measure_heights:
+            # For Stage 1 training, use virtual terrain for perception
+            use_virtual = self._should_use_virtual_terrain()
+            self.measured_heights = self._get_heights(use_virtual_terrain=use_virtual)
+            
             # measured_heights shape: (num_envs, num_height_points=225)
             # root_states[:, 2] shape: (num_envs,)
             # We need to compute relative height: robot_height - terrain_height for each point
@@ -916,6 +934,10 @@ class XBotLFreeEnv(LeggedRobot):
             
             # 4.2 Query terrain heights at sample points
             # Follow the same method as _get_heights()
+            # For Stage 1 training, use virtual terrain for foothold reward
+            use_virtual = self._should_use_virtual_terrain()
+            height_data = self.height_samples_virtual if (use_virtual and self.height_samples_virtual is not None) else self.height_samples
+            
             points = sample_points_global.clone()
             points += self.terrain.cfg.border_size
             points = (points / self.terrain.cfg.horizontal_scale).long()
@@ -923,13 +945,13 @@ class XBotLFreeEnv(LeggedRobot):
             py = points[:, :, 1].view(-1)
             
             # Clamp to valid heightfield range
-            px = torch.clip(px, 0, self.height_samples.shape[0] - 2)
-            py = torch.clip(py, 0, self.height_samples.shape[1] - 2)
+            px = torch.clip(px, 0, height_data.shape[0] - 2)
+            py = torch.clip(py, 0, height_data.shape[1] - 2)
             
             # Sample terrain heights (take minimum of nearby grid points for safety)
-            heights1 = self.height_samples[px, py]
-            heights2 = self.height_samples[px + 1, py]
-            heights3 = self.height_samples[px, py + 1]
+            heights1 = height_data[px, py]
+            heights2 = height_data[px + 1, py]
+            heights3 = height_data[px, py + 1]
             terrain_heights = torch.min(torch.min(heights1, heights2), heights3)
             terrain_heights = terrain_heights.view(self.num_envs, num_samples) * self.terrain.cfg.vertical_scale
             

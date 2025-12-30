@@ -571,6 +571,15 @@ class LeggedRobot(BaseTask):
         plane_params.dynamic_friction = self.cfg.terrain.dynamic_friction
         plane_params.restitution = self.cfg.terrain.restitution
         self.gym.add_ground(self.sim, plane_params)
+        
+        # Load virtual height samples if available (for plane + virtual terrain mode)
+        if hasattr(self.terrain, 'heightsamples_virtual') and self.terrain.heightsamples_virtual is not None:
+            self.height_samples = None  # No physical heightfield
+            self.height_samples_virtual = torch.tensor(self.terrain.heightsamples_virtual).view(
+                self.terrain.tot_rows, self.terrain.tot_cols).to(self.device)
+            print(f"[LeggedRobot] Loaded virtual height samples for plane + virtual terrain mode")
+        else:
+            self.height_samples_virtual = None
     
     def _create_heightfield(self):
         """ Adds a heightfield terrain to the simulation, sets parameters based on the cfg.
@@ -590,6 +599,13 @@ class LeggedRobot(BaseTask):
 
         self.gym.add_heightfield(self.sim, self.terrain.heightsamples, hf_params)
         self.height_samples = torch.tensor(self.terrain.heightsamples).view(self.terrain.tot_rows, self.terrain.tot_cols).to(self.device)
+        
+        # Load virtual height samples if available (for Stage 1 training with imaginary terrain)
+        if hasattr(self.terrain, 'heightsamples_virtual') and self.terrain.heightsamples_virtual is not None:
+            self.height_samples_virtual = torch.tensor(self.terrain.heightsamples_virtual).view(self.terrain.tot_rows, self.terrain.tot_cols).to(self.device)
+            print(f"[LeggedRobot] Loaded virtual height samples for imaginary terrain training")
+        else:
+            self.height_samples_virtual = None
 
     def _create_trimesh(self):
         """ Adds a triangle mesh terrain to the simulation, sets parameters based on the cfg.
@@ -606,6 +622,13 @@ class LeggedRobot(BaseTask):
         tm_params.restitution = self.cfg.terrain.restitution
         self.gym.add_triangle_mesh(self.sim, self.terrain.vertices.flatten(order='C'), self.terrain.triangles.flatten(order='C'), tm_params)   
         self.height_samples = torch.tensor(self.terrain.heightsamples).view(self.terrain.tot_rows, self.terrain.tot_cols).to(self.device)
+        
+        # Load virtual height samples if available (for Stage 1 training with imaginary terrain)
+        if hasattr(self.terrain, 'heightsamples_virtual') and self.terrain.heightsamples_virtual is not None:
+            self.height_samples_virtual = torch.tensor(self.terrain.heightsamples_virtual).view(self.terrain.tot_rows, self.terrain.tot_cols).to(self.device)
+            print(f"[LeggedRobot] Loaded virtual height samples for imaginary terrain training")
+        else:
+            self.height_samples_virtual = None
 
     def _create_envs(self):
         """ Creates environments:
@@ -706,7 +729,12 @@ class LeggedRobot(BaseTask):
         """ Sets environment origins. On rough terrain the origins are defined by the terrain platforms.
             Otherwise create a grid.
         """
-        if self.cfg.terrain.mesh_type in ["heightfield", "trimesh"]:
+        # Check if we have terrain with custom origins (heightfield/trimesh/plane+virtual)
+        has_terrain_layout = (self.cfg.terrain.mesh_type in ["heightfield", "trimesh"]) or \
+                            (self.cfg.terrain.mesh_type == "plane" and hasattr(self, 'terrain') and 
+                             hasattr(self.terrain, 'env_origins'))
+        
+        if has_terrain_layout:
             self.custom_origins = True
             self.env_origins = torch.zeros(self.num_envs, 3, device=self.device, requires_grad=False)
             # put robots at the origins defined by the terrain
@@ -778,12 +806,13 @@ class LeggedRobot(BaseTask):
         points[:, :, 1] = grid_y.flatten()
         return points
 
-    def _get_heights(self, env_ids=None):
+    def _get_heights(self, env_ids=None, use_virtual_terrain=False):
         """ Samples heights of the terrain at required points around each robot.
             The points are offset by the base's position and rotated by the base's yaw
 
         Args:
             env_ids (List[int], optional): Subset of environments for which to return the heights. Defaults to None.
+            use_virtual_terrain (bool): If True, use virtual height samples instead of physical ones (for Stage 1 training)
 
         Raises:
             NameError: [description]
@@ -792,7 +821,13 @@ class LeggedRobot(BaseTask):
             [type]: [description]
         """
         if self.cfg.terrain.mesh_type == 'plane':
-            return torch.zeros(self.num_envs, self.num_height_points, device=self.device, requires_grad=False)
+            # Check if we have virtual terrain (plane + virtual mode)
+            if use_virtual_terrain and self.height_samples_virtual is not None:
+                # Use virtual terrain for perception (Stage 1 training)
+                pass  # Continue to sampling code below
+            else:
+                # Pure plane mode, return zeros
+                return torch.zeros(self.num_envs, self.num_height_points, device=self.device, requires_grad=False)
         elif self.cfg.terrain.mesh_type == 'none':
             raise NameError("Can't measure height with terrain mesh type 'none'")
 
@@ -805,12 +840,19 @@ class LeggedRobot(BaseTask):
         points = (points/self.terrain.cfg.horizontal_scale).long()
         px = points[:, :, 0].view(-1)
         py = points[:, :, 1].view(-1)
-        px = torch.clip(px, 0, self.height_samples.shape[0]-2)
-        py = torch.clip(py, 0, self.height_samples.shape[1]-2)
+        
+        # Choose height samples based on use_virtual_terrain flag
+        if use_virtual_terrain and self.height_samples_virtual is not None:
+            height_data = self.height_samples_virtual
+        else:
+            height_data = self.height_samples
+        
+        px = torch.clip(px, 0, height_data.shape[0]-2)
+        py = torch.clip(py, 0, height_data.shape[1]-2)
 
-        heights1 = self.height_samples[px, py]
-        heights2 = self.height_samples[px+1, py]
-        heightXBotL = self.height_samples[px, py+1]
+        heights1 = height_data[px, py]
+        heights2 = height_data[px+1, py]
+        heightXBotL = height_data[px, py+1]
         heights = torch.min(heights1, heights2)
         heights = torch.min(heights, heightXBotL)
 
