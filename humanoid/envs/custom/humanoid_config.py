@@ -272,7 +272,7 @@ class XBotLCfgPPO(LeggedRobotCfgPPO):
         # Double Critic for sparse reward learning (foothold)
         use_double_critic = False  # Enable via --double_critic flag
         advantage_weight_dense = 1.0  # Weight for dense rewards (locomotion)
-        advantage_weight_sparse = 1.0  # Weight for sparse rewards (foothold)
+        advantage_weight_sparse = 0.25  # Weight for sparse rewards (foothold)
 
     class runner:
         policy_class_name = 'ActorCritic'
