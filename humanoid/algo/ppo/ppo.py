@@ -160,8 +160,15 @@ class PPO:
         mean_surrogate_loss = 0
 
         generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
-        for obs_batch, critic_obs_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, \
-            old_mu_batch, old_sigma_batch, hid_states_batch, masks_batch in generator:
+        for batch_data in generator:
+            # Unpack batch data (different for single vs double critic)
+            if self.use_double_critic:
+                obs_batch, critic_obs_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, \
+                old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, hid_states_batch, masks_batch, \
+                target_values2_batch, returns2_batch = batch_data
+            else:
+                obs_batch, critic_obs_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, \
+                old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, hid_states_batch, masks_batch = batch_data
 
 
                 self.actor_critic.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
@@ -212,17 +219,16 @@ class PPO:
 
                 # Double critic: add second value loss (Critic 2 - sparse rewards)
                 if self.use_double_critic:
-                    # Simplified approach: train critic2 to predict the combined returns
-                    # This works because the advantage combination already handles the reward separation
-                    # Both critics learn to predict the total return, but through different reward streams
+                    # Train critic2 to predict sparse rewards returns (returns2)
+                    # Critic1 learns dense rewards, Critic2 learns sparse rewards
                     if self.use_clipped_value_loss:
-                        value_clipped2 = target_values_batch + (value_batch2 - target_values_batch).clamp(-self.clip_param,
+                        value_clipped2 = target_values2_batch + (value_batch2 - target_values2_batch).clamp(-self.clip_param,
                                                                                                         self.clip_param)
-                        value_losses2 = (value_batch2 - returns_batch).pow(2)
-                        value_losses_clipped2 = (value_clipped2 - returns_batch).pow(2)
+                        value_losses2 = (value_batch2 - returns2_batch).pow(2)
+                        value_losses_clipped2 = (value_clipped2 - returns2_batch).pow(2)
                         value_loss2 = torch.max(value_losses2, value_losses_clipped2).mean()
                     else:
-                        value_loss2 = (returns_batch - value_batch2).pow(2).mean()
+                        value_loss2 = (returns2_batch - value_batch2).pow(2).mean()
                     
                     # Total loss with both critics
                     loss = surrogate_loss + self.value_loss_coef * (value_loss + value_loss2) - self.entropy_coef * entropy_batch.mean()

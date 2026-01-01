@@ -38,29 +38,44 @@ from humanoid import LEGGED_GYM_ROOT_DIR
 # import isaacgym
 from humanoid.envs import *
 from humanoid.utils import get_args, export_policy_as_jit, task_registry, Logger
-from isaacgym.torch_utils import *
 
 import torch
 from tqdm import tqdm
 from datetime import datetime
 
 
-def play(args):
+def play(args, fast_viewer=False):
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
+    
+    # ========================================
+    # CONFIGURATION: Simple and Clear
+    # ========================================
+    num_rows = 9  # Difficulty levels (0 to 8)
+    num_cols = 1  # Terrain types
+    
+    # Set number of robots - must be >= num_rows for best visualization
+    # Recommended: multiple of num_rows for even distribution
+    target_num_envs = 18  # 2 robots per difficulty level
+    
+    # ⚠️ CRITICAL: Set these BEFORE creating environment (used in parent class __init__)
+    env_cfg.terrain.num_rows = num_rows
+    env_cfg.terrain.num_cols = num_cols
+    
+    # Enable curriculum mode and set max init level to cover ALL difficulty levels
+    # This ensures robots can spawn at any difficulty level (0 to num_rows-1)
+    env_cfg.terrain.curriculum = True
+    env_cfg.terrain.max_init_terrain_level = num_rows - 1  # Max difficulty level (0 to 8 for num_rows=9)
+    
+    # ⚠️ IMPORTANT: terrain levels are 0-indexed
+    # num_rows=9 means levels [0, 1, 2, 3, 4, 5, 6, 7, 8]
+    # max_init_terrain_level must be num_rows-1 to avoid index out of bounds
+    
     # Configure for Terrain Curriculum (Balancing Beams + Stones Everywhere)
     env_cfg.terrain.mesh_type = 'trimesh'
     
     # Increase resolution for better visual of terrain details
     # Resolution: 0.02m (2cm) for good detail
     env_cfg.terrain.horizontal_scale = 0.02
-    
-    # Follow design convention: num_rows = difficulty levels, num_cols = terrain type variants
-    # Modify these two parameters to change the terrain layout
-    num_rows = 9  # Number of difficulty levels
-    num_cols = 1   # Number of terrain types (stones everywhere)
-    
-    env_cfg.terrain.num_rows = num_rows
-    env_cfg.terrain.num_cols = num_cols
     
     # Terrain dimensions: uniform 8.5m × 8.5m per terrain cell
     # For balancing beams: 2m effective width × 8m length (center carved, sides are pits)
@@ -73,12 +88,18 @@ def play(args):
     # Ensure standard terrain parameters are compatible
     env_cfg.terrain.border_size = 5
     
-    # Enable curriculum mode
-    env_cfg.terrain.curriculum = True
-    env_cfg.terrain.max_init_terrain_level = num_rows - 1  # Max difficulty level
-    
     # Override num_envs based on terrain layout
-    env_cfg.env.num_envs = num_rows * num_cols  # One robot per terrain cell
+    # ⚠️ IMPORTANT: Both must match to avoid conflicts
+    # update_cfg_from_args will use args.num_envs to override env_cfg.env.num_envs
+    
+    # Set both to the same value
+    env_cfg.env.num_envs = target_num_envs
+    args.num_envs = target_num_envs
+    
+    print(f"[INFO] Final configuration:")
+    print(f"  - env_cfg.env.num_envs = {env_cfg.env.num_envs}")
+    print(f"  - args.num_envs = {args.num_envs}\n")
+    
     env_cfg.sim.max_gpu_contact_pairs = 2**10
     
     # Terrain proportions control which terrain appears in each column:
@@ -97,48 +118,90 @@ def play(args):
 
     train_cfg.seed = 123145
     print("train_cfg.runner_class_name:", train_cfg.runner_class_name)
+    
+    # Debug: Print configuration before environment creation
+    print(f"\n=== Configuration Before Environment Creation ===")
+    print(f"num_rows: {num_rows}, num_cols: {num_cols}")
+    print(f"num_envs: {env_cfg.env.num_envs}")
+    print(f"max_init_terrain_level: {env_cfg.terrain.max_init_terrain_level}")
+    print(f"curriculum: {env_cfg.terrain.curriculum}")
+    print(f"\n📌 Valid terrain levels: [0, {num_rows-1}] (total: {num_rows} levels)")
+    print(f"   If max_init_terrain_level >= num_rows, you'll get index out of bounds!")
+    print(f"=================================================\n")
 
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
     env.set_camera(env_cfg.viewer.pos, env_cfg.viewer.lookat)
+    
+    # Debug: Print actual environment state after creation
+    print(f"\n=== Environment State After Creation ===")
+    print(f"env.num_envs: {env.num_envs}")
+    print(f"env.max_terrain_level: {env.max_terrain_level}")
+    print(f"Initial terrain_levels: {env.terrain_levels}")
+    print(f"========================================\n")
 
-    # Manually distribute robots to different terrain cells (row, col)
-    # env.env_origins is a tensor of shape (num_envs, 3)
-    # terrain.env_origins is numpy array of shape (num_rows, num_cols, 3)
-    # Following design convention: 
-    #   - num_rows = difficulty levels (configurable via num_rows variable above)
-    #   - num_cols = terrain types (configurable via num_cols variable above)
+    # ========================================
+    # Simple and Safe: Override terrain_levels, then use reset_idx
+    # (Similar to play.py but with custom terrain distribution)
+    # ========================================
+    print("=" * 60)
+    print("Setting up terrain curriculum distribution...")
+    print("=" * 60)
+    
     if hasattr(env, 'terrain') and env.cfg.terrain.mesh_type in ["heightfield", "trimesh"]:
         terrain_num_rows = env.terrain.cfg.num_rows
         terrain_num_cols = env.terrain.cfg.num_cols
         
-        print(f"Distributing robots across terrain curriculum ({terrain_num_rows} difficulty × {terrain_num_cols} terrain types)...")
-        print("Terrain layout (uniform 8.5m × 8.5m per cell):")
-        print("  Column 0: Balancing Beams (2m width × 8m length effective, 1.5m×1m platforms)")
-        print("  Column 1: Stones Everywhere (8m × 8m effective, 4m×4m central platform)")
-        print("  Column 2: Stepping Stones (2m width × 8m length effective, 1.5m×1m platforms, alternating stones)")
-        print(f"  Rows: {terrain_num_rows} difficulty levels from 0.0 to 1.0")
-        
-        # Assign each robot to a different terrain cell
-        # Robot 0-2 at difficulty 0 (row 0), Robot 3-5 at difficulty 1 (row 1), etc.
+        # Override terrain_levels to ensure even distribution across difficulty levels
         for i in range(env.num_envs):
-            row_idx = (i // terrain_num_cols) % terrain_num_rows  # Difficulty level
-            col_idx = i % terrain_num_cols  # Terrain type
-            
-            # Get the origin for this terrain cell [row_idx, col_idx]
-            terrain_origin = torch.from_numpy(env.terrain.env_origins[row_idx, col_idx]).to(env.device).to(torch.float)
-            env.env_origins[i] = terrain_origin
-            
-            # Reset robot state to this new origin
-            env.root_states[i, :3] = env.env_origins[i]
-            env.root_states[i, :2] += torch_rand_float(-0.5, 0.5, (2,1), device=env.device).squeeze(1) # Add slight noise
-            
-            difficulty_val = row_idx / (terrain_num_rows - 1) if terrain_num_rows > 1 else 0.5
-            terrain_name = {0: 'Beams', 1: 'Stones', 2: 'Stepping'}[col_idx]
-            print(f"  Robot {i}: row={row_idx} (diff={difficulty_val:.3f}), col={col_idx} ({terrain_name})")
+            row_idx = (i // terrain_num_cols) % terrain_num_rows
+            col_idx = i % terrain_num_cols
+            env.terrain_levels[i] = row_idx
+            env.terrain_types[i] = col_idx
+        
+        # Show distribution
+        print(f"\n📊 Robot Distribution ({env.num_envs} robots across {terrain_num_rows} levels):")
+        for level in range(terrain_num_rows):
+            count = (env.terrain_levels == level).sum().item()
+            print(f"  Level {level}: {count} robot(s)")
+        print("=" * 60 + "\n")
+        
+        # Now reset all robots to apply the new terrain_levels
+        # ⚠️ Temporarily disable init_done to prevent _update_terrain_curriculum from running
+        print(f"\n⚠️  Calling env.reset_idx(all_env_ids)...")
+        print(f"   (Temporarily setting init_done=False to preserve manual assignment)")
+        
+        original_init_done = env.init_done
+        env.init_done = False  # This makes _update_terrain_curriculum return early
+        
+        all_env_ids = torch.arange(env.num_envs, device=env.device)
+        env.reset_idx(all_env_ids)
+        
+        env.init_done = original_init_done  # Restore for runtime curriculum
+        print(f"   (Restored init_done=True, curriculum will work normally during runtime)")
+        
+        print(f"\n🔍 DEBUG: After reset_idx")
+        print(f"   terrain_levels: {env.terrain_levels}")
+        
+        # Show distribution AFTER reset
+        print(f"\n📊 Distribution AFTER reset_idx:")
+        all_perfect = True
+        expected_count = env.num_envs // terrain_num_rows
+        for level in range(terrain_num_rows):
+            count = (env.terrain_levels == level).sum().item()
+            status = "✅" if count == expected_count or count == expected_count + 1 else "❌"
+            print(f"  Level {level}: {count} robot(s) {status}")
+            if count == 0:
+                all_perfect = False
+        
+        if all_perfect:
+            print("\n✅ SUCCESS: All difficulty levels have robots!")
+        else:
+            print("\n❌ WARNING: Some levels have no robots (curriculum might still be active)")
+        print("=" * 60 + "\n")
     
-    # Trigger a reset to apply the new root states
-    obs, critic_obs = env.reset()
+    # Get observations (same as play.py - simple and safe)
+    obs = env.get_observations()
     
     # load policy
     train_cfg.runner.resume = True
@@ -185,12 +248,20 @@ def play(args):
         actions = policy(obs.detach()) # * 0.
         
         if FIX_COMMAND:
-            env.commands[:, 0] = 0.5    # 1.0
-            env.commands[:, 1] = 0.
-            env.commands[:, 2] = 0.
-            env.commands[:, 3] = 0.
+            env.commands[:, 0] = 1.0    # Forward velocity command (m/s) - increase for faster motion
+            env.commands[:, 1] = 0.     # Lateral velocity
+            env.commands[:, 2] = 0.     # Yaw rate
+            env.commands[:, 3] = 0.     # Heading
 
         obs, critic_obs, rews, dones, infos = env.step(actions.detach())
+        
+        # Render with optional frame sync control for speed
+        if fast_viewer and not RENDER:
+            # Fast mode: don't sync to real time, run as fast as possible
+            env.render(sync_frame_time=False)
+        elif not RENDER:
+            # Normal mode: sync to real time for smooth viewing
+            env.render(sync_frame_time=True)
 
         if RENDER:
             env.gym.fetch_results(env.sim, True)
@@ -231,9 +302,21 @@ def play(args):
 
 if __name__ == '__main__':
     EXPORT_POLICY = True
-    RENDER = True
+    RENDER = False  # Set to True to record video
     FIX_COMMAND = True
+    FAST_VIEWER = True  # Set to True to speed up live viewer (disable frame sync)
+    
+    print("=" * 60)
+    print("PLAYBACK SETTINGS")
+    print("=" * 60)
+    print(f"  RENDER (record video): {RENDER}")
+    print(f"  FAST_VIEWER (no sync): {FAST_VIEWER}")
+    print(f"  FIX_COMMAND: {FIX_COMMAND}")
+    if FAST_VIEWER and not RENDER:
+        print("\n⚡ Fast viewer mode enabled - simulation will run as fast as possible!")
+    print("=" * 60 + "\n")
+    
     args = get_args()
-    play(args)
+    play(args, fast_viewer=FAST_VIEWER)
 
 

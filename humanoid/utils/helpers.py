@@ -147,6 +147,13 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
         # num envs
         if args.num_envs is not None:
             env_cfg.env.num_envs = args.num_envs
+        # terrain parameters
+        if hasattr(args, 'platform_width') and args.platform_width is not None:
+            env_cfg.terrain.platform_width = args.platform_width
+            print(f"[Config Override] platform_width = {args.platform_width}m")
+        if hasattr(args, 'platform_length') and args.platform_length is not None:
+            env_cfg.terrain.platform_length = args.platform_length
+            print(f"[Config Override] platform_length = {args.platform_length}m")
     if cfg_train is not None:
         if args.seed is not None:
             cfg_train.seed = args.seed
@@ -249,6 +256,16 @@ def get_args():
             "action": "store_true",
             "default": False,
             "help": "Enable double critic for separate dense/sparse reward learning.",
+        },
+        {
+            "name": "--platform_width",
+            "type": float,
+            "help": "Width of central platform in stage1 virtual terrain (meters). Overrides config file if provided.",
+        },
+        {
+            "name": "--platform_length",
+            "type": float,
+            "help": "Length of central platform in stage1 virtual terrain (meters). Overrides config file if provided.",
         },
     ]
     # parse arguments

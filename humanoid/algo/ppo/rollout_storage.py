@@ -234,6 +234,11 @@ class RolloutStorage:
         advantages = self.advantages.flatten(0, 1)
         old_mu = self.mu.flatten(0, 1)
         old_sigma = self.sigma.flatten(0, 1)
+        
+        # Double critic: prepare returns2 and values2
+        if self.use_double_critic:
+            values2 = self.values2.flatten(0, 1)
+            returns2 = self.returns2.flatten(0, 1)
 
         for epoch in range(num_epochs):
             for i in range(num_mini_batches):
@@ -251,5 +256,14 @@ class RolloutStorage:
                 advantages_batch = advantages[batch_idx]
                 old_mu_batch = old_mu[batch_idx]
                 old_sigma_batch = old_sigma[batch_idx]
-                yield obs_batch, critic_observations_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, \
-                       old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (None, None), None
+                
+                # Double critic: also yield returns2 and values2
+                if self.use_double_critic:
+                    target_values2_batch = values2[batch_idx]
+                    returns2_batch = returns2[batch_idx]
+                    yield obs_batch, critic_observations_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, \
+                           old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (None, None), None, \
+                           target_values2_batch, returns2_batch
+                else:
+                    yield obs_batch, critic_observations_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, \
+                           old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (None, None), None

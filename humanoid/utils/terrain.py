@@ -138,6 +138,8 @@ class Terrain:
                                 length=self.length_per_env_pixels,
                                 vertical_scale=self.cfg.vertical_scale,
                                 horizontal_scale=self.cfg.horizontal_scale)
+        # Add cfg reference for terrain generation functions that need it
+        terrain.cfg = self.cfg
         slope = difficulty * 0.4
         step_height = 0.05 + 0.18 * difficulty
         discrete_obstacles_height = 0.05 + difficulty * 0.2
@@ -532,9 +534,9 @@ def stones_everywhere_terrain(terrain, difficulty=1):
     mid_x = terrain.width // 2
     mid_y = terrain.length // 2
     
-    # Central platform dimensions (defined early for logging)
-    platform_width = 4  # meters
-    platform_length = 4  # meters
+    # Central platform dimensions (read from config or use default)
+    platform_width = getattr(terrain.cfg, 'platform_width', 4.0)  # meters (default: 4.0)
+    platform_length = getattr(terrain.cfg, 'platform_length', 4.0)  # meters (default: 4.0)
     
     # Convert parameters to pixels
     stone_size_pixels = int(stone_size / terrain.horizontal_scale)
@@ -617,6 +619,7 @@ def stones_everywhere_stage1_terrain(terrain, difficulty=1):
     - Foothold reward computed from VIRTUAL stones heights (sparse reward signal)
     - Locomotion rewards computed from FLAT terrain (dense reward signal)
     
+    
     This allows the robot to "imagine" walking on stones while actually on safe ground,
     learning terrain-aware behaviors without the risk of early termination.
     
@@ -666,9 +669,9 @@ def stones_everywhere_stage1_terrain(terrain, difficulty=1):
     mid_x = terrain.width // 2
     mid_y = terrain.length // 2
     
-    # Central platform dimensions
-    platform_width = 1  # meters
-    platform_length = 1  # meters
+    # Central platform dimensions (can be overridden via command line)
+    platform_width = getattr(terrain.cfg, 'platform_width', 1.0)  # meters (default: 1.0)
+    platform_length = getattr(terrain.cfg, 'platform_length', 1.0)  # meters (default: 1.0)
     
     # Convert parameters to pixels
     stone_size_pixels = int(stone_size / terrain.horizontal_scale)
@@ -927,6 +930,8 @@ class HumanoidTerrain(Terrain):
                                 length=self.length_per_env_pixels,
                                 vertical_scale=self.cfg.vertical_scale,
                                 horizontal_scale=self.cfg.horizontal_scale)
+        # Add cfg reference for terrain generation functions that need it
+        terrain.cfg = self.cfg
         discrete_obstacles_height = difficulty * 0.04
         r_height = difficulty * 0.07
         h_slope = difficulty * 0.15

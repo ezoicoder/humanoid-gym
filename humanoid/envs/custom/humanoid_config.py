@@ -39,17 +39,29 @@ class XBotLCfg(LeggedRobotCfg):
     """
     class env(LeggedRobotCfg.env):
         # change the observation dim
-        frame_stack = 1  # Paper spec: no frame stacking for actor
-        c_frame_stack = 1  # Critic also no frame stacking, aligned with actor
-        # Paper spec observation: 2(phase) + 3(cmd) + 12(q) + 12(dq) + 12(a_t-1) + 3(omega) + 3(gravity) + 225(heightmap) = 272D
-        num_single_obs = 272
-        num_observations = num_single_obs  # No frame stacking: 272D
-        # Critic now uses the same observation as actor (aligned)
-        single_num_privileged_obs = 272  # Same as actor: 272D
-        num_privileged_obs = single_num_privileged_obs  # No frame stacking: 272D
+        frame_stack = 15  # Actor: 15 frames of history for temporal modeling
+        c_frame_stack = 3  # Critic: 3 frames of history
+        
+        # Actor observation structure:
+        # - Base obs (frame stacked): 15 × 47D = 705D
+        #   47D = 2(phase) + 3(cmd) + 12(q) + 12(dq) + 12(a_t-1) + 3(omega) + 3(gravity)
+        # - Height map (current frame only): 1 × 225D = 225D
+        # - Total: 705 + 225 = 930D
+        num_single_obs = 47  # Base observation (without height map)
+        num_observations = int(frame_stack * num_single_obs + 225)  # 930D
+        
+        # Critic observation structure:
+        # - Privileged obs (frame stacked): 3 × 73D = 219D
+        #   73D = 5(cmd) + 12(q) + 12(dq) + 12(a) + 12(diff) + 3(lin_vel) + 3(ang_vel) 
+        #        + 3(euler) + 2(push_force) + 3(push_torque) + 1(friction) + 1(mass) + 2(stance) + 2(contact)
+        # - Height map (current frame only): 1 × 225D = 225D
+        # - Total: 219 + 225 = 444D
+        single_num_privileged_obs = 73  # Privileged observation (without height map)
+        num_privileged_obs = int(c_frame_stack * single_num_privileged_obs + 225)  # 444D
+        
         num_actions = 12
         num_envs = 4096
-        episode_length_s = 24     # episode length in seconds
+        episode_length_s = 96     # episode length in seconds
         use_ref_actions = False   # speed up training by using reference actions
 
     class safety:
@@ -188,7 +200,7 @@ class XBotLCfg(LeggedRobotCfg):
         target_feet_height = 0.06        # m
         cycle_time = 0.64                # sec
         # if true negative total rewards are clipped at zero (avoids early termination problems)
-        only_positive_rewards = True
+        only_positive_rewards = False  # Disabled to let foothold penalty fully affect training
         # tracking reward = exp(error*sigma)
         tracking_sigma = 5
         max_contact_force = 700  # Forces above this value are penalized
@@ -243,8 +255,10 @@ class XBotLCfgPPO(LeggedRobotCfgPPO):
 
     class policy:
         init_noise_std = 1.0
-        actor_hidden_dims = [512, 256, 128]
-        critic_hidden_dims = [512, 256, 128]  # Same as actor
+        # Actor input: 930D (705 + 225) → larger first layer
+        actor_hidden_dims = [768, 512, 256]
+        # Critic input: 444D (219 + 225) → adapted first layer
+        critic_hidden_dims = [1024, 512, 256]
         use_double_critic = False  # Will be set to True by --double_critic flag
 
     class algorithm(LeggedRobotCfgPPO.algorithm):
@@ -258,13 +272,13 @@ class XBotLCfgPPO(LeggedRobotCfgPPO):
         # Double Critic for sparse reward learning (foothold)
         use_double_critic = False  # Enable via --double_critic flag
         advantage_weight_dense = 1.0  # Weight for dense rewards (locomotion)
-        advantage_weight_sparse = 0.25  # Weight for sparse rewards (foothold)
+        advantage_weight_sparse = 1.0  # Weight for sparse rewards (foothold)
 
     class runner:
         policy_class_name = 'ActorCritic'
         algorithm_class_name = 'PPO'
         num_steps_per_env = 60  # per iteration
-        max_iterations = 3001  # number of policy updates
+        max_iterations = 5001  # number of policy updates
 
         # logging
         save_interval = 100  # Please check for potential savings every `save_interval` iterations.
@@ -286,7 +300,7 @@ class XBotLStoneCfg(XBotLCfg):
         # Curriculum layout: 9 difficulty levels × 1 terrain type (stones everywhere)
         # num_rows = difficulty levels (0-8), num_cols = terrain type instances
         num_rows = 9
-        num_cols = 1
+        num_cols = 4
         
         # Increase resolution for stone details - 2cm for training
         horizontal_scale = 0.02

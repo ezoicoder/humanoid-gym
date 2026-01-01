@@ -275,7 +275,7 @@ class XBotLFreeEnv(LeggedRobot):
         """ Sets a vector used to scale the noise added to the observations.
             [NOTE]: Must be adapted when changing the observations structure
             
-            New observation structure (272D):
+            New observation structure (47D base, without height map):
             - 0:2    - phase (sin, cos)
             - 2:5    - commands (v_x, v_y, omega_yaw)
             - 5:17   - joint positions (q)
@@ -283,7 +283,8 @@ class XBotLFreeEnv(LeggedRobot):
             - 29:41  - previous actions
             - 41:44  - base angular velocity
             - 44:47  - projected gravity
-            - 47:272 - height map (15x15=225)
+            
+            Height map noise is added separately (not frame stacked)
 
         Args:
             cfg (Dict): Environment config file
@@ -293,7 +294,7 @@ class XBotLFreeEnv(LeggedRobot):
         """
         noise_vec = torch.zeros(
             self.cfg.env.num_single_obs, device=self.device)
-        print(f"size of noise_vec: {noise_vec.shape}")
+        print(f"size of noise_vec (base obs): {noise_vec.shape}")
         self.add_noise = self.cfg.noise.add_noise
         noise_scales = self.cfg.noise.noise_scales
         
@@ -304,7 +305,6 @@ class XBotLFreeEnv(LeggedRobot):
         noise_vec[29: 41] = 0.  # previous actions - no noise
         noise_vec[41: 44] = noise_scales.ang_vel * self.obs_scales.ang_vel  # base angular velocity
         noise_vec[44: 47] = noise_scales.quat * self.obs_scales.quat  # projected gravity (similar to orientation)
-        noise_vec[47: 272] = noise_scales.height_measurements * self.obs_scales.height_measurements  # height map
         
         return noise_vec
 
@@ -346,52 +346,73 @@ class XBotLFreeEnv(LeggedRobot):
         
         diff = self.dof_pos - self.ref_dof_pos
 
-        # Paper spec: use projected_gravity instead of euler angles for better representation
-        # Both actor and critic use the same observation
+        # ===== Actor Observation (47D base, without height map) =====
         obs_buf = torch.cat((
-            self.command_input,  # 5 = 2D(sin cos) + 3D(vel_x, vel_y, aug_vel_yaw)
+            self.command_input,  # 5D = 2(sin/cos) + 3(cmd)
             q,    # 12D
-            dq,  # 12D
+            dq,   # 12D
             self.actions,   # 12D
-            self.base_ang_vel * self.obs_scales.ang_vel,  # 3
-            self.projected_gravity,  # 3D - gravity direction in robot frame (replaces euler angles)
-        ), dim=-1)
+            self.base_ang_vel * self.obs_scales.ang_vel,  # 3D
+            self.projected_gravity,  # 3D
+        ), dim=-1)  # Total: 47D
 
-        # Add height map to observations (paper spec: 15x15 elevation map)
+        # ===== Critic Observation (73D privileged, without height map) =====
+        privileged_obs_buf = torch.cat((
+            self.command_input,  # 5D = 2(sin/cos) + 3(cmd)
+            (self.dof_pos - self.default_joint_pd_target) * self.obs_scales.dof_pos,  # 12D
+            self.dof_vel * self.obs_scales.dof_vel,  # 12D
+            self.actions,  # 12D
+            diff,  # 12D - joint position error from reference
+            self.base_lin_vel * self.obs_scales.lin_vel,  # 3D
+            self.base_ang_vel * self.obs_scales.ang_vel,  # 3D
+            self.base_euler_xyz * self.obs_scales.quat,  # 3D
+            self.rand_push_force[:, :2],  # 2D
+            self.rand_push_torque,  # 3D
+            self.env_frictions,  # 1D
+            self.body_mass / 30.,  # 1D
+            stance_mask,  # 2D
+            contact_mask,  # 2D
+        ), dim=-1)  # Total: 73D
+
+        # ===== Add noise to observations =====
+        if self.add_noise:
+            obs_noise = torch.randn_like(obs_buf) * self.noise_scale_vec * self.cfg.noise.noise_level
+            obs_now = obs_buf + obs_noise
+        else:
+            obs_now = obs_buf.clone()
+        
+        # Append to history for frame stacking
+        self.obs_history.append(obs_now)
+        self.critic_history.append(privileged_obs_buf)
+
+        # ===== Frame stacking (Actor: 15 frames, Critic: 3 frames) =====
+        obs_buf_all = torch.stack([self.obs_history[i]
+                                   for i in range(self.obs_history.maxlen)], dim=1)  # (N, 15, 47)
+        obs_buf_stacked = obs_buf_all.reshape(self.num_envs, -1)  # (N, 705)
+        
+        privileged_obs_buf_all = torch.cat([self.critic_history[i] 
+                                           for i in range(self.cfg.env.c_frame_stack)], dim=1)  # (N, 219)
+
+        # ===== Add height map (current frame only, no stacking) =====
         if self.cfg.terrain.measure_heights:
             # For Stage 1 training, use virtual terrain for perception
             use_virtual = self._should_use_virtual_terrain()
             self.measured_heights = self._get_heights(use_virtual_terrain=use_virtual)
             
-            # measured_heights shape: (num_envs, num_height_points=225)
-            # root_states[:, 2] shape: (num_envs,)
-            # We need to compute relative height: robot_height - terrain_height for each point
+            # Compute relative height
             heights = torch.clip(
                 self.root_states[:, 2].unsqueeze(1) - 0.5 - self.measured_heights, 
                 -1, 1.
-            ) * self.obs_scales.height_measurements
-            # heights shape should be: (num_envs, 225)
-            obs_buf = torch.cat((obs_buf, heights), dim=-1)  # Add heightmap: 47 + 225 = 272D
+            ) * self.obs_scales.height_measurements  # (N, 225)
+            
+            # Add height map to both actor and critic
+            self.obs_buf = torch.cat((obs_buf_stacked, heights), dim=-1)  # (N, 705 + 225 = 930)
+            self.privileged_obs_buf = torch.cat((privileged_obs_buf_all, heights), dim=-1)  # (N, 219 + 225 = 444)
         else:
-            # If heights not measured, use zeros as placeholder to maintain dimension consistency
+            # If heights not measured, use zeros as placeholder
             heights = torch.zeros(self.num_envs, self.num_height_points, device=self.device)
-            obs_buf = torch.cat((obs_buf, heights), dim=-1)
-        # Critic uses the same observation as actor (aligned)
-        self.privileged_obs_buf = obs_buf.clone()
-        
-        if self.add_noise:  
-            obs_now = obs_buf.clone() + torch.randn_like(obs_buf) * self.noise_scale_vec * self.cfg.noise.noise_level
-        else:
-            obs_now = obs_buf.clone()
-        self.obs_history.append(obs_now)
-        self.critic_history.append(self.privileged_obs_buf)
-
-
-        obs_buf_all = torch.stack([self.obs_history[i]
-                                   for i in range(self.obs_history.maxlen)], dim=1)  # N,T,K
-
-        self.obs_buf = obs_buf_all.reshape(self.num_envs, -1)  # N, T*K
-        self.privileged_obs_buf = torch.cat([self.critic_history[i] for i in range(self.cfg.env.c_frame_stack)], dim=1)
+            self.obs_buf = torch.cat((obs_buf_stacked, heights), dim=-1)
+            self.privileged_obs_buf = torch.cat((privileged_obs_buf_all, heights), dim=-1)
 
     def _reset_root_states(self, env_ids):
         """
@@ -460,49 +481,52 @@ class XBotLFreeEnv(LeggedRobot):
     
     def _update_terrain_curriculum(self, env_ids):
         """
-        Override: Curriculum based on "three in a row" success rule
+        Override: Implements curriculum based on episode_success_flags.
         
-        Rules:
-        1. Robot progresses to next level after 3 consecutive successes
-        2. Robot is NOT downgraded before reaching max level (stays at current level on failure)
-        3. After reaching max level, randomly sample level (same as parent class)
+        Requires 3 consecutive successes to progress to the next level.
+        No downgrades - robots stay at their current level if they fail.
         
-        Reference: "the robot progresses to the next terrain level when it 
-        successfully traverses the current terrain level three times in a row. 
-        Furthermore, the robot will not be sent back to an easier terrain level 
-        before it pass all levels"
+        Args:
+            env_ids (List[int]): ids of environments being reset
         """
+        # Implement Terrain curriculum
         if not self.init_done or not hasattr(self, 'episode_success_flags'):
+            # don't change on initial reset
             return
         
-        for env_id in env_ids:
-            success = self.episode_success_flags[env_id].item()
-            current_level = self.terrain_levels[env_id].item()
-            
-            if success:
-                # Increment consecutive success counter
-                self.consecutive_successes[env_id] += 1
-                
-                # Check if ready to level up (3 consecutive successes)
-                if self.consecutive_successes[env_id] >= 3:
-                    # Level up
-                    self.terrain_levels[env_id] = current_level + 1
-                    
-                    # Reset consecutive success counter for new level
-                    self.consecutive_successes[env_id] = 0
-            else:
-                # Failure: reset consecutive success counter
-                self.consecutive_successes[env_id] = 0
-                # No downgrade (stay at current level)
+        # Update consecutive success counter
+        # If succeeded: increment counter
+        # If failed: reset counter to 0
+        self.consecutive_successes[env_ids] = torch.where(
+            self.episode_success_flags[env_ids],
+            self.consecutive_successes[env_ids] + 1,
+            torch.zeros_like(self.consecutive_successes[env_ids])
+        )
         
-        # Handle reaching max level: sample random level (same as parent class)
+        # Only upgrade after 3 consecutive successes (no downgrades)
+        move_up = self.consecutive_successes[env_ids] >= 3
+        
+        # Upgrade terrain level and reset consecutive success counter for those who succeeded
+        self.terrain_levels[env_ids] = torch.where(
+            move_up,
+            self.terrain_levels[env_ids] + 1,
+            self.terrain_levels[env_ids]
+        )
+        
+        # Reset consecutive successes for environments that upgraded
+        self.consecutive_successes[env_ids] = torch.where(
+            move_up,
+            torch.zeros_like(self.consecutive_successes[env_ids]),
+            self.consecutive_successes[env_ids]
+        )
+        
+        # Robots that solve the last level are sent to a random one
         self.terrain_levels[env_ids] = torch.where(
             self.terrain_levels[env_ids] >= self.max_terrain_level,
             torch.randint_like(self.terrain_levels[env_ids], self.max_terrain_level),
-            torch.clip(self.terrain_levels[env_ids], 0)
+            torch.clip(self.terrain_levels[env_ids], 0)  # (the minimum level is zero)
         )
         
-        # Update environment origins based on new terrain levels
         self.env_origins[env_ids] = self.terrain_origins[
             self.terrain_levels[env_ids], 
             self.terrain_types[env_ids]
@@ -561,14 +585,14 @@ class XBotLFreeEnv(LeggedRobot):
         beams_success = beams_or_stepping_mask & (rel_pos[:, 0] > 1.0)
         newly_success |= beams_success
         
-        # Type 8: Stones Everywhere - 到达边缘 + 行走足够远
-        stones_mask = (self.actual_terrain_types == 8)
+        # Type 8 & 10: Stones Everywhere - 到达边缘
+        stones_mask = (self.actual_terrain_types == 8) | (self.actual_terrain_types == 10)
         dist_from_center = torch.norm(rel_pos[:, :2], dim=1)
-        stones_success = stones_mask & (dist_from_center > 3.75) & (self.episode_distance_traveled >= 8.0)
+        stones_success = stones_mask & (dist_from_center > 3.75)
         newly_success |= stones_success
         
         # 其他地形类型 - 使用原始距离逻辑
-        other_mask = (self.actual_terrain_types != 7) & (self.actual_terrain_types != 8) & (self.actual_terrain_types != 9)
+        other_mask = (self.actual_terrain_types != 7) & (self.actual_terrain_types != 8) & (self.actual_terrain_types != 9) & (self.actual_terrain_types != 10)
         if torch.any(other_mask):
             # 原始逻辑：走得远 (distance > env_length / 2) → 成功
             distance = torch.norm(rel_pos[:, :2], dim=1)

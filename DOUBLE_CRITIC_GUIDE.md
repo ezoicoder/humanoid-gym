@@ -125,6 +125,10 @@ L_value2 = MSE(V2, returns_sparse)  # Critic2 学习预测 sparse 奖励
 L_total = L_policy + coef * (L_value1 + L_value2) - entropy_coef * entropy
 ```
 
+**重要修复（已完成）：** 
+- ✅ Critic2 现在正确使用 `returns2`（sparse returns）作为训练目标
+- ✅ 之前的版本错误地使用了 `returns`（dense returns），导致 Critic2 学习目标不一致
+
 ---
 
 ## 📊 配置参数

@@ -65,6 +65,9 @@ class LeggedRobotCfg(BaseConfig):
         terrain_proportions = [0.1, 0.1, 0.35, 0.25, 0.2]
         # trimesh only:
         slope_treshold = 0.75 # slopes above this threshold will be corrected to vertical surfaces
+        # stage1 stones terrain parameters:
+        platform_width = 1.0  # [m] width of central platform in virtual terrain
+        platform_length = 1.0  # [m] length of central platform in virtual terrain
 
     class commands:
         curriculum = False
