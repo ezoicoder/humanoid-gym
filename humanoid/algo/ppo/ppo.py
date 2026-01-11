@@ -170,80 +170,77 @@ class PPO:
                 obs_batch, critic_obs_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, \
                 old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, hid_states_batch, masks_batch = batch_data
 
+            # Common forward pass (single or double critic)
+            self.actor_critic.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
+            actions_log_prob_batch = self.actor_critic.get_actions_log_prob(actions_batch)
 
-                self.actor_critic.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
-                actions_log_prob_batch = self.actor_critic.get_actions_log_prob(actions_batch)
-                
-                # Evaluate critics
-                if self.use_double_critic:
-                    value_batch, value_batch2 = self.actor_critic.evaluate(critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1])
-                else:
-                    value_batch = self.actor_critic.evaluate(critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1])
-                
-                mu_batch = self.actor_critic.action_mean
-                sigma_batch = self.actor_critic.action_std
-                entropy_batch = self.actor_critic.entropy
+            # Evaluate critics
+            if self.use_double_critic:
+                value_batch, value_batch2 = self.actor_critic.evaluate(critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1])
+            else:
+                value_batch = self.actor_critic.evaluate(critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1])
 
-                # KL
-                if self.desired_kl != None and self.schedule == 'adaptive':
-                    with torch.inference_mode():
-                        kl = torch.sum(
-                            torch.log(sigma_batch / old_sigma_batch + 1.e-5) + (torch.square(old_sigma_batch) + torch.square(old_mu_batch - mu_batch)) / (2.0 * torch.square(sigma_batch)) - 0.5, axis=-1)
-                        kl_mean = torch.mean(kl)
+            mu_batch = self.actor_critic.action_mean
+            sigma_batch = self.actor_critic.action_std
+            entropy_batch = self.actor_critic.entropy
 
-                        if kl_mean > self.desired_kl * 2.0:
-                            self.learning_rate = max(1e-5, self.learning_rate / 1.5)
-                        elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0.0:
-                            self.learning_rate = min(1e-2, self.learning_rate * 1.5)
-                        
-                        for param_group in self.optimizer.param_groups:
-                            param_group['lr'] = self.learning_rate
+            # KL (adaptive LR schedule)
+            if self.desired_kl != None and self.schedule == 'adaptive':
+                with torch.inference_mode():
+                    kl = torch.sum(
+                        torch.log(sigma_batch / old_sigma_batch + 1.e-5) + (torch.square(old_sigma_batch) + torch.square(old_mu_batch - mu_batch)) / (2.0 * torch.square(sigma_batch)) - 0.5, axis=-1)
+                    kl_mean = torch.mean(kl)
 
-
-                # Surrogate loss
-                ratio = torch.exp(actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch))
-                surrogate = -torch.squeeze(advantages_batch) * ratio
-                surrogate_clipped = -torch.squeeze(advantages_batch) * torch.clamp(ratio, 1.0 - self.clip_param,
-                                                                                1.0 + self.clip_param)
-                surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
-
-                # Value function loss (Critic 1 - dense rewards)
-                if self.use_clipped_value_loss:
-                    value_clipped = target_values_batch + (value_batch - target_values_batch).clamp(-self.clip_param,
-                                                                                                    self.clip_param)
-                    value_losses = (value_batch - returns_batch).pow(2)
-                    value_losses_clipped = (value_clipped - returns_batch).pow(2)
-                    value_loss = torch.max(value_losses, value_losses_clipped).mean()
-                else:
-                    value_loss = (returns_batch - value_batch).pow(2).mean()
-
-                # Double critic: add second value loss (Critic 2 - sparse rewards)
-                if self.use_double_critic:
-                    # Train critic2 to predict sparse rewards returns (returns2)
-                    # Critic1 learns dense rewards, Critic2 learns sparse rewards
-                    if self.use_clipped_value_loss:
-                        value_clipped2 = target_values2_batch + (value_batch2 - target_values2_batch).clamp(-self.clip_param,
-                                                                                                        self.clip_param)
-                        value_losses2 = (value_batch2 - returns2_batch).pow(2)
-                        value_losses_clipped2 = (value_clipped2 - returns2_batch).pow(2)
-                        value_loss2 = torch.max(value_losses2, value_losses_clipped2).mean()
-                    else:
-                        value_loss2 = (returns2_batch - value_batch2).pow(2).mean()
+                    if kl_mean > self.desired_kl * 2.0:
+                        self.learning_rate = max(1e-5, self.learning_rate / 1.5)
+                    elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0.0:
+                        self.learning_rate = min(1e-2, self.learning_rate * 1.5)
                     
-                    # Total loss with both critics
-                    loss = surrogate_loss + self.value_loss_coef * (value_loss + value_loss2) - self.entropy_coef * entropy_batch.mean()
-                    mean_value_loss2 += value_loss2.item()
+                    for param_group in self.optimizer.param_groups:
+                        param_group['lr'] = self.learning_rate
+
+
+            # Surrogate loss
+            ratio = torch.exp(actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch))
+            surrogate = -torch.squeeze(advantages_batch) * ratio
+            surrogate_clipped = -torch.squeeze(advantages_batch) * torch.clamp(ratio, 1.0 - self.clip_param,
+                                                                            1.0 + self.clip_param)
+            surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
+
+            # Value function loss (Critic 1 - dense rewards)
+            if self.use_clipped_value_loss:
+                value_clipped = target_values_batch + (value_batch - target_values_batch).clamp(-self.clip_param,
+                                                                                                self.clip_param)
+                value_losses = (value_batch - returns_batch).pow(2)
+                value_losses_clipped = (value_clipped - returns_batch).pow(2)
+                value_loss = torch.max(value_losses, value_losses_clipped).mean()
+            else:
+                value_loss = (returns_batch - value_batch).pow(2).mean()
+
+            # Double critic: add second value loss (Critic 2 - sparse rewards)
+            if self.use_double_critic:
+                if self.use_clipped_value_loss:
+                    value_clipped2 = target_values2_batch + (value_batch2 - target_values2_batch).clamp(-self.clip_param,
+                                                                                                    self.clip_param)
+                    value_losses2 = (value_batch2 - returns2_batch).pow(2)
+                    value_losses_clipped2 = (value_clipped2 - returns2_batch).pow(2)
+                    value_loss2 = torch.max(value_losses2, value_losses_clipped2).mean()
                 else:
-                    loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
+                    value_loss2 = (returns2_batch - value_batch2).pow(2).mean()
+                
+                loss = surrogate_loss + self.value_loss_coef * (value_loss + value_loss2) - self.entropy_coef * entropy_batch.mean()
+                mean_value_loss2 += value_loss2.item()
+            else:
+                loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
 
-                # Gradient step
-                self.optimizer.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
-                self.optimizer.step()
+            # Gradient step
+            self.optimizer.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
+            self.optimizer.step()
 
-                mean_value_loss += value_loss.item()
-                mean_surrogate_loss += surrogate_loss.item()
+            mean_value_loss += value_loss.item()
+            mean_surrogate_loss += surrogate_loss.item()
 
         num_updates = self.num_learning_epochs * self.num_mini_batches
         mean_value_loss /= num_updates

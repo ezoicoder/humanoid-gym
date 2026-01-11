@@ -31,6 +31,7 @@
 
 
 from humanoid.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
+import numpy as np
 
 
 class XBotLCfg(LeggedRobotCfg):
@@ -91,8 +92,8 @@ class XBotLCfg(LeggedRobotCfg):
         # rough terrain only:
         measure_heights = True  # Enable height measurements for terrain perception
         # Paper spec: 15x15 grid with 0.1m spacing = 1.4m x 1.4m coverage
-        measured_points_x = [-0.7, -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]  # 15 points
-        measured_points_y = [-0.7, -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]  # 15 points
+        measured_points_x = -0.35 + np.arange(15) * 0.05 # 15 points, more points in the front
+        measured_points_y = -0.35 + np.arange(15) * 0.05  # 15 points
         static_friction = 0.6
         dynamic_friction = 0.6
         terrain_length = 8.
@@ -211,17 +212,18 @@ class XBotLCfg(LeggedRobotCfg):
             feet_clearance = 1.
             feet_contact_number = 1.2
             # gait
-            feet_air_time = 1.
+            feet_air_time = 1.0 # 0.8
+            excessive_foot_height_without_speed = 0.0 # penalty for lifting feet too high when robot is slow
             foot_slip = -0.05
             feet_distance = 0.2
             knee_distance = 0.2
             # contact
             feet_contact_forces = -0.01
             # vel tracking
-            tracking_lin_vel = 1.2
+            tracking_lin_vel = 1.2 # 1.5
             tracking_ang_vel = 1.1
             vel_mismatch_exp = 0.5  # lin_z; ang x,y
-            low_speed = 0.2
+            low_speed = 0.2 # 0.4
             track_vel_hard = 0.5
             # base pos
             default_joint_pos = 0.5
@@ -312,7 +314,7 @@ class XBotLStoneCfg(XBotLCfg):
         # Terrain proportions: only load "stones everywhere" terrain
         # Proportions array: [flat, obstacles, uniform, slope+, slope-, stairs+, stairs-, beams, stones, stepping]
         # Set only stones (index 8) to 1.0, all others to 0
-        terrain_proportions = [0, 0, 0, 0, 0, 0, 0, 0, 1.0, 0.0]
+        terrain_proportions = [0, 0, 0, 0, 0, 0, 0, 0, 0, 1.0]
 
 class XBotLStoneCfgPPO(XBotLCfgPPO):
     class runner(XBotLCfgPPO.runner):
@@ -350,9 +352,9 @@ class XBotLStoneStage1Cfg(XBotLCfg):
         border_size = 5
         
         # Terrain proportions: only load "stones_everywhere_stage1" terrain (type 10)
-        # Proportions array: [flat, obstacles, uniform, slope+, slope-, stairs+, stairs-, beams, stones, stepping, stage1_stones]
+        # Proportions array: [flat, obstacles, uniform, slope+, slope-, stairs+, stairs-, beams, stones, stepping, stage1_stones, stage1_stepping]
         # Set only stage1_stones (index 10) to 1.0, all others to 0
-        terrain_proportions = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.0]
+        terrain_proportions = [0, 0, 0, 0, 0, 0, 0, 0, 0, 1.0, 0, 0]
 
 class XBotLStoneStage1CfgPPO(XBotLCfgPPO):
     class runner(XBotLCfgPPO.runner):
@@ -402,8 +404,8 @@ class XBotLStoneStage1PlaneCfg(XBotLCfg):
         terrain_length = 8.5
         border_size = 5
         
-        # Terrain proportions: only stage1_stones (type 10)
-        terrain_proportions = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.0]
+        # Terrain proportions: only stage1_stones (type 10) or stage1_stepping (type 11)
+        terrain_proportions = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.0, 0]
 
 class XBotLStoneStage1PlaneCfgPPO(XBotLCfgPPO):
     class runner(XBotLCfgPPO.runner):

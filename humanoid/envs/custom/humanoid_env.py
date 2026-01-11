@@ -36,7 +36,7 @@ from isaacgym import gymtorch, gymapi
 import torch
 from humanoid.envs import LeggedRobot
 
-from humanoid.utils.terrain import  HumanoidTerrain
+from humanoid.utils.terrain import HumanoidTerrain
 
 
 class XBotLFreeEnv(LeggedRobot):
@@ -85,7 +85,7 @@ class XBotLFreeEnv(LeggedRobot):
             num_y = len(cfg.terrain.measured_points_y) if hasattr(cfg.terrain, 'measured_points_y') else 15
             self.num_height_points = num_x * num_y
         
-        print("fuck num_height_points:", self.num_height_points)
+        print("num_height_points:", self.num_height_points)
 
         # Initialize measured_heights with correct shape to avoid dimension mismatch
         if cfg.terrain.measure_heights:
@@ -242,14 +242,15 @@ class XBotLFreeEnv(LeggedRobot):
             bool: True if using virtual terrain (Stage 1 training), False otherwise
         """
         # Terrain type 10 = stones_everywhere_stage1 (flat physical + virtual stones)
+        # or 11 = stepping_stones_stage1 (flat physical + virtual stepping stones) - more efficient finetuning
         if self.actual_terrain_types is None:
             return False
         # For now, we check if ANY environment is type 10 (could be refined per-env if needed)
-        return (self.actual_terrain_types == 10).any().item()
+        return (self.actual_terrain_types == 10).any().item() or (self.actual_terrain_types == 11).any().item()
 
 
     def create_sim(self):
-        """ Creates simulation, terrain and evironments
+        """ Creates simulation, terrain and environments
         """
         self.up_axis_idx = 2  # 2 for z, 1 for y -> adapt gravity accordingly
         self.sim = self.gym.create_sim(
@@ -813,6 +814,46 @@ class XBotLFreeEnv(LeggedRobot):
         self.feet_height *= ~contact
         return rew_pos
 
+    def _reward_excessive_foot_height_without_speed(self):
+        """Penalize high foot lift when forward speed is too low.
+
+        This reward function penalizes the robot for lifting its feet excessively high
+        when its forward speed is significantly lower than the commanded speed. The penalty
+        is applied only when there is a forward command and the robot is moving too slowly
+        """
+        # Only consider forward commands
+        cmd_x = self.commands[:, 0]
+        abs_cmd_x = torch.abs(cmd_x)
+        enable_mask = abs_cmd_x > 0.2
+
+        # Current forward speed
+        vx = self.base_lin_vel[:, 0]
+        abs_vx = torch.abs(vx)
+
+        # Speed threshold: consider "not moving" if significantly slower than command (relative to command)
+        slow_mask = abs_vx < 0.3 * abs_cmd_x
+
+        # Foot height: refer to definition in feet_clearance
+        feet_z = self.rigid_state[:, self.feet_indices, 2] - 0.05
+        # Only consider swing legs (non-support legs)
+        swing_mask = 1 - self._get_gait_phase()
+        swing_feet_z = (feet_z * swing_mask).max(dim=1).values  # Take the highest swing foot
+
+        # Height threshold: consider "excessive foot height" only if significantly higher than target
+        target_h = self.cfg.rewards.target_feet_height
+        # Excess height (>= 0 means penalty applies)
+        extra_height = torch.clamp(swing_feet_z - (target_h + 0.03), min=0.0)
+
+        # Penalty intensity: higher height and lower speed result in greater penalty
+        penalty = extra_height * (0.3 * abs_cmd_x - abs_vx).clamp(min=0.0)
+
+        # Only active when there is a forward command and the robot is significantly too slow
+        active = enable_mask & slow_mask
+        penalty = penalty * active
+
+        # Return positive "badness" which will be converted to negative reward by negative scale
+        return penalty
+
     def _reward_low_speed(self):
         """
         Rewards or penalizes the robot based on its speed relative to the commanded speed. 
@@ -910,10 +951,11 @@ class XBotLFreeEnv(LeggedRobot):
         contact = self.contact_forces[:, self.feet_indices, 2] > 5.0  # (num_envs, 2)
         
         # 2. Define foot sampling points in local foot frame
-        # Conservative estimate: 0.14m × 0.06m (inset 10% from URDF box 0.16m × 0.07m)
-        # Using 3×3 grid = 9 sample points
-        foot_length = 0.14
-        foot_width = 0.06
+       # Conservative estimate: 0.21m × 0.09m
+        # Using 7×5 grid = 35 sample points
+        # MODIFIED: Use more realistic XBot-L feet size
+        foot_length = 0.21
+        foot_width = 0.09
         
         # Foot center offset in ankle_roll_link frame (based on URDF analysis)
         # The ankle_roll_link origin is approximately at the foot center, but may have slight offset
@@ -921,14 +963,15 @@ class XBotLFreeEnv(LeggedRobot):
         foot_center_offset = torch.tensor([0.0, 0.0, 0.0], device=self.device)  # (x, y, z) in local frame
         
         # Create sampling grid (relative to foot center)
-        x_samples = torch.tensor([-foot_length/2, 0.0, foot_length/2], device=self.device)
-        y_samples = torch.tensor([-foot_width/2, 0.0, foot_width/2], device=self.device)
+        x_samples = torch.tensor([-foot_length/2, -foot_length/3, -foot_length/6, 0.0, foot_length/6, foot_length/3, foot_length/2], device=self.device)
+        # y_samples = torch.tensor([-foot_width/2, 0.0, foot_width/2], device=self.device) # Simplified to 3 points along width
+        y_samples = torch.tensor([-foot_width/2, -foot_width/4, 0.0, foot_width/4, foot_width/2], device=self.device)
         
-        # Generate 9 sample points: (9, 3) with z=0, plus offset to foot center
+        # Generate 35 sample points: (35, 3) with z=0, plus offset to foot center
         sample_points_local = torch.stack([
             torch.stack([x, y, torch.tensor(0.0, device=self.device)]) + foot_center_offset
             for x in x_samples for y in y_samples
-        ])  # (9, 3)
+        ])  # (35, 3)
         
         num_samples = sample_points_local.shape[0]
         

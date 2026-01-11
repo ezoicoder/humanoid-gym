@@ -171,7 +171,7 @@ if self.cfg.terrain.mesh_type == 'plane' and use_virtual:
     # 使用虚拟地形高度场计算 foothold reward
 ```
 
-在 `humanoid_stones_stage1_plane_ppo` 任务中，虽然物理地形是平面，但 foothold reward 依然基于**虚拟石头地形高度场**计算，确保训练效果。
+在 `humanoid_stones_stage1_plane_ppo` 任务中，虽然物理地形是平面，但 foothold reward 依然基于**虚拟石头地形高度场**计算，确保训练效果。目前支持 `stones_everywhere` 和 `stepping_stones` 两种虚拟地形。
 
 ### 4.4 地形生成（`humanoid/utils/terrain.py`）
 
@@ -206,7 +206,7 @@ class terrain:
     mesh_type = 'plane'              # 物理地形：平面
     use_virtual_terrain = True       # 启用虚拟地形
     curriculum = True                # 课程学习
-    terrain_proportions = [0,0,0,0,0,0,0,0,0,0,1.0]  # 仅使用 stage1_stones
+    terrain_proportions = [0,0,0,0,0,0,0,0,0,0,1.0,0.0]  # 仅使用 stage1_stones 或 stage1_stepping
 ```
 
 ### 4.7 文件结构总览

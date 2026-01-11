@@ -108,7 +108,7 @@ def play(args, fast_viewer=False):
     #   - Column 0 (choice ≈ 0.001): falls in range (0.0, 0.33] → balancing_beams_terrain
     #   - Column 1 (choice ≈ 0.334): falls in range (0.33, 0.67] → stones_everywhere_terrain
     #   - Column 2 (choice ≈ 0.667): falls in range (0.67, 1.0] → stepping_stones_terrain
-    env_cfg.terrain.terrain_proportions = [0, 0, 0, 0, 0, 0, 0, 0, 1.0, 0]
+    env_cfg.terrain.terrain_proportions = [0, 0, 0, 0, 0, 0, 0, 0, 0, 1.0]
     
     env_cfg.noise.add_noise = True
     env_cfg.domain_rand.push_robots = False 

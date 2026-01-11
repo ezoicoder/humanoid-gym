@@ -217,7 +217,7 @@ class Terrain:
         self.env_origins[i, j] = [env_origin_x, env_origin_y, env_origin_z]
     
     def _init_plane_with_virtual(self, cfg):
-        print(f"fuck init plane virtual")
+        print(f"init plane virtual")
         """
         Initialize virtual terrain for plane physics mode.
         
@@ -248,7 +248,7 @@ class Terrain:
         # But we need virtual heightfield for perception
         self.height_field_virtual = np.zeros((self.tot_rows, self.tot_cols), dtype=np.int16)
         
-        print(f"fuck plane curiculum {cfg.curriculum}")
+        print(f"plane curiculum {cfg.curriculum}")
 
         # Generate virtual terrain only
         if cfg.curriculum:
@@ -270,7 +270,7 @@ class Terrain:
             for i in range(self.cfg.num_rows):
                 if self.cfg.num_rows > 1:
                     difficulty = i / (self.cfg.num_rows - 1)
-                    # print(f"fuck plane difficulty: {difficulty}")
+                    # print(f"plane difficulty: {difficulty}")
                 else:
                     difficulty = i / self.cfg.num_rows
                 choice = j / self.cfg.num_cols + 0.001
@@ -589,7 +589,8 @@ def stones_everywhere_terrain(terrain, difficulty=1):
             
             # Height variation ±0.05m as specified in paper
             height_var = np.random.uniform(-0.05, 0.05)
-            height_int = int(height_var / terrain.vertical_scale)
+            # height_int = int(height_var / terrain.vertical_scale)
+            height_int = 0
             
             # Clip to effective area boundaries
             x1 = max(effective_x1, x1)
@@ -722,7 +723,8 @@ def stones_everywhere_stage1_terrain(terrain, difficulty=1):
             
             # Height variation ±0.05m as specified in paper
             height_var = np.random.uniform(-0.05, 0.05)
-            height_int = int(height_var / terrain.vertical_scale)
+            # height_int = int(height_var / terrain.vertical_scale)
+            height_int = 0
             
             # Clip to effective area boundaries
             x1 = max(effective_x1, x1)
@@ -863,13 +865,14 @@ def stepping_stones_terrain(terrain, difficulty=1):
             
             # Height variation ±0.05m as specified
             height_var = np.random.uniform(-0.05, 0.05)
-            height_int = int(height_var / terrain.vertical_scale)
+            # height_int = int(height_var / terrain.vertical_scale)
+            height_int = 0 # Flat stones as per new specification
             
-            # 保证xvar是整数，且取值区间为[stone_size_pixels //2-lateral_offset_pixels, lateral_offset_pixels - stone_size_pixels //2]
+            # Ensure xvar is an integer within the range [stone_size_pixels //2 - lateral_offset_pixels, lateral_offset_pixels - stone_size_pixels //2]
             xvar_low = stone_size_pixels // 2 - lateral_offset_pixels
             xvar_high = lateral_offset_pixels - stone_size_pixels // 2
             if xvar_high < xvar_low:
-                xvar_high = xvar_low  # 如果区间非法，则degenerate为单点
+                xvar_high = xvar_low  # If the range is invalid, degenerate to a single point
             xvar = np.random.randint(xvar_low, xvar_high + 1)
 
             x1 = x1 + xvar
@@ -891,6 +894,143 @@ def stepping_stones_terrain(terrain, difficulty=1):
             current_y = y1 + stone_size_pixels + stone_distance_pixels
         
         print(f"  Generated {stone_count} stones in {row_side} row (x_offset={lateral_offset if row_side=='right' else -lateral_offset:.2f}m)")
+
+def stepping_stones_stage1_terrain(terrain, difficulty=1):
+    """Stage 1 variant of stepping stones: flat physical ground + virtual stepping stones.
+
+    Similar to ``stones_everywhere_stage1_terrain``：
+    - Physical height map `height_field_raw` remains all zeros (flat ground for safe physical simulation)
+    - Virtual height map `height_field_virtual` generates the complete stepping-stones terrain
+
+    In this way:
+    - The robot physically walks on flat ground (won't terminate due to falling into pits)
+    - The heightmap and foothold reward use the virtual stepping-stones to learn precise foot placement
+
+    Parameters and geometry layout are fully reused from ``stepping_stones_terrain``:
+    - Effective area width 2m, length 8m, with 0.25m border
+    - Start/end platforms 1.5m×1m
+    - In between are two staggered rows of square stones, surrounded by 1m deep pits
+    """
+    # Map difficulty 0..1 to discrete level 0..8 (round to nearest integer)
+    l = int(np.round(difficulty * 8))
+    l = np.clip(l, 0, 8)
+
+    # Stone size sequence from specification
+    stone_sizes = [0.8, 0.65, 0.5, 0.4, 0.35, 0.3, 0.25, 0.2, 0.2]
+    stone_size = stone_sizes[l]
+
+    # Stone distance (forward spacing) formula from specification
+    stone_distance = 0.1 + 0.05 * l
+
+    # Lateral offset for left/right alternation (fixed at 0.4m from center)
+    lateral_offset = 0.4
+
+    # ========== PART 1: Physical terrain (FLAT) ==========
+    # Set entire physical terrain to flat ground (height = 0)
+    terrain.height_field_raw[:, :] = 0
+
+    # ========== PART 2: Virtual terrain (STEPPING STONES) ==========
+    # Create a virtual height field of the same size as the physical height field
+    terrain.height_field_virtual = np.zeros_like(terrain.height_field_raw)
+
+    # Set entire virtual terrain to pit depth (1.0m below ground)
+    depth = 1.0
+    depth_int = int(depth / terrain.vertical_scale)
+    terrain.height_field_virtual[:, :] = -depth_int
+
+    # Border configuration（与 stepping_stones_terrain 一致）
+    border_width = 0.25  # 0.25m border on all sides
+    border_width_pixels = int(border_width / terrain.horizontal_scale)
+
+    # Create border frame around the virtual terrain (height = 0)
+    terrain.height_field_virtual[:, 0:border_width_pixels] = 0
+    terrain.height_field_virtual[:, terrain.length - border_width_pixels:terrain.length] = 0
+    terrain.height_field_virtual[0:border_width_pixels, :] = 0
+    terrain.height_field_virtual[terrain.width - border_width_pixels:terrain.width, :] = 0
+
+    # Define effective area: 2m width centered in the terrain
+    effective_width = 2.0
+    effective_width_pixels = int(effective_width / terrain.horizontal_scale)
+    mid_x = terrain.width // 2
+
+    area_x1 = mid_x - effective_width_pixels // 2
+    area_x2 = mid_x + effective_width_pixels // 2
+
+    # Platform size: 1.5m (width) × 1m (length)
+    platform_width = 1.5
+    platform_length = 1.0
+    platform_width_pixels = int(platform_width / terrain.horizontal_scale)
+    platform_length_pixels = int(platform_length / terrain.horizontal_scale)
+
+    # Start platform: immediately after the border
+    start_y = border_width_pixels
+    terrain.height_field_virtual[mid_x - platform_width_pixels//2 : mid_x + platform_width_pixels//2,
+                                start_y : start_y + platform_length_pixels] = 0
+
+    # End platform: near the other border
+    end_y = terrain.length - border_width_pixels - platform_length_pixels
+    terrain.height_field_virtual[mid_x - platform_width_pixels//2 : mid_x + platform_width_pixels//2,
+                                end_y : end_y + platform_length_pixels] = 0
+
+    # Pixel scale parameters
+    stone_size_pixels = int(stone_size / terrain.horizontal_scale)
+    stone_distance_pixels = int(stone_distance / terrain.horizontal_scale)
+    lateral_offset_pixels = int(lateral_offset / terrain.horizontal_scale)
+
+    # Stones start placement after the start platform
+    stone_start_y = start_y + platform_length_pixels
+
+    print(f"[Stage1 Stepping Stones] difficulty={difficulty:.2f}, l={l}, stone_size={stone_size:.3f}m, "
+          f"stone_distance={stone_distance:.3f}m, lateral_offset={lateral_offset:.3f}m, effective_width=2.0m (virtual)")
+
+    # Generate two separate rows of stones: left row and right row
+    for row_side in ['left', 'right']:
+        if row_side == 'left':
+            current_x_center = mid_x - lateral_offset_pixels
+        else:
+            current_x_center = mid_x + lateral_offset_pixels
+
+        current_y = stone_start_y
+        stone_count = 0
+
+        while current_y < end_y:
+            
+            x1 = current_x_center - stone_size_pixels // 2
+            x2 = current_x_center + stone_size_pixels // 2
+
+            y1 = current_y
+            y2 = current_y + stone_size_pixels
+
+            if y2 > end_y:
+                y2 = end_y
+
+            # Height variation ±0.05m as specified
+            height_int = 0
+
+            # Ensure xvar is an integer within the range [stone_size_pixels //2 - lateral_offset_pixels, lateral_offset_pixels - stone_size_pixels //2]
+            xvar_low = stone_size_pixels // 2 - lateral_offset_pixels
+            xvar_high = lateral_offset_pixels - stone_size_pixels // 2
+            if xvar_high < xvar_low:
+                xvar_high = xvar_low
+            xvar = np.random.randint(xvar_low, xvar_high + 1)
+
+            x1 = x1 + xvar
+            x2 = x2 + xvar
+
+            # Limit within effective area and border
+            x1 = max(area_x1, x1)
+            x2 = min(area_x2, x2)
+            y1 = max(border_width_pixels, y1)
+            y2 = min(terrain.length - border_width_pixels, y2)
+
+            if x2 > x1 and y2 > y1:
+                terrain.height_field_virtual[x1:x2, y1:y2] = height_int
+                stone_count += 1
+
+            # Next stone position: current stone start + size + distance
+            current_y = y1 + stone_size_pixels + stone_distance_pixels
+
+        print(f"  [Stage1] Generated {stone_count} stones in {row_side} row (x_offset={lateral_offset if row_side=='right' else -lateral_offset:.2f}m)")
 
 class HumanoidTerrain(Terrain):
     def __init__(self, cfg: LeggedRobotCfg.terrain, num_robots) -> None:
@@ -982,9 +1122,16 @@ class HumanoidTerrain(Terrain):
             # Stepping Stones
             terrain_type = 9
             stepping_stones_terrain(terrain, difficulty)
-        else:
+        elif choice < self.proportions[10]:
             # Stage 1: Flat with Virtual Stones (imaginary training)
             terrain_type = 10
             stones_everywhere_stage1_terrain(terrain, difficulty)
+        elif choice < self.proportions[11]:
+            # Stage 1: Flat with Virtual Stepping Stones (imaginary training)
+            terrain_type = 11
+            stepping_stones_stage1_terrain(terrain, difficulty)
+        else:
+            # Other terrain types can be added here
+            pass
         
         return terrain, terrain_type

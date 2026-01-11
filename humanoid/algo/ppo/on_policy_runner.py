@@ -295,6 +295,7 @@ class OnPolicyRunner:
             self.alg.actor_critic.load_state_dict(loaded_dict["model_state_dict"])
         except RuntimeError as e:
             if "critic2" in str(e):
+                print(f'[DEBUG & REWARD] Caught RuntimeError while loading model: {e}')
                 print("⚠️  Warning: Loading model without critic2 (old single-critic model)")
                 print("   → Initializing critic2 with critic1's weights")
                 
